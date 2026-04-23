@@ -1,0 +1,37 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local config
+.env.local
+.env.*.local
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Test files
+*_test.go
+test/
+tests/
+
+# Local build
+/dist/
+/build/
+
+# Empty or template files
+*.local

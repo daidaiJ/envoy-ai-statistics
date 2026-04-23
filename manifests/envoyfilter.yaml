@@ -1,0 +1,79 @@
+# EnvoyFilter CR - 针对 LLM 推理服务的 POST 流量应用 ext_proc
+# 只匹配 POST 方法，响应体使用流式模式避免内存占用
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: llm-usage-ext-proc
+  namespace: istio-system
+spec:
+  # 工作负载选择器：匹配带有 inference=true label 的服务
+  workloadSelector:
+    labels:
+      inference: "true"
+  
+  configPatches:
+    # 1. 配置 ext_proc gRPC cluster
+    - applyTo: CLUSTER
+      patch:
+        operation: ADD
+        value:
+          name: llm-ext-proc-cluster
+          type: STATIC
+          connect_timeout: 5s
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: llm-ext-proc-cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: llm-ext-proc.istio-system.svc.cluster.local
+                          port_value: 8888
+
+    # 2. 配置路由规则：只匹配 POST 方法（不限制路径）
+    - applyTo: ROUTE_CONFIGURATION
+      match:
+        context: SIDECAR_INBOUND
+      patch:
+        operation: MERGE
+        value:
+          virtual_hosts:
+            - name: llm-inference
+              domains:
+                - "*"
+              routes:
+                - match:
+                    prefix: "/"            # 匹配所有路径
+                    method: POST           # ✅ 只匹配 POST 方法
+                  route:
+                    cluster: ""
+                  typed_per_filter_config:
+                    envoy.filters.http.ext_proc:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                      disabled: false
+
+    # 3. 插入 ext_proc HTTP filter
+    - applyTo: HTTP_FILTER
+      match:
+        context: SIDECAR_INBOUND
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.ext_proc
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+            grpc_service:
+              envoy_grpc:
+                cluster_name: llm-ext-proc-cluster
+            processing_mode:
+              request_header_mode: SEND      # 发送请求头
+              request_body_mode: NONE        # 不发送请求体
+              response_header_mode: NONE     # 不发送响应头
+              response_body_mode: STREAMED   # ✅ 流式模式，避免 buffer 内存占用
+            message_timeout: 30s
+            failure_mode_allow: true         # ext_proc 失败时透传流量
