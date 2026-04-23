@@ -1,0 +1,60 @@
+# ext_proc 服务部署 - 用于 LLM API 请求统计
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-ext-proc
+  namespace: istio-system
+  labels:
+    app: llm-ext-proc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-ext-proc
+  template:
+    metadata:
+      labels:
+        app: llm-ext-proc
+    spec:
+      containers:
+        - name: ext-proc
+          image: llm-ext-proc:latest  # 替换为实际镜像
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8888
+              name: grpc
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            grpc:
+              port: 8888
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            grpc:
+              port: 8888
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+# ext_proc gRPC Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-ext-proc
+  namespace: istio-system
+  labels:
+    app: llm-ext-proc
+spec:
+  ports:
+    - port: 8888
+      name: grpc
+      protocol: TCP
+      targetPort: 8888
+  selector:
+    app: llm-ext-proc
