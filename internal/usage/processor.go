@@ -10,14 +10,17 @@ import (
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 )
 
-// 需要深度统计的 LLM API 路径（不含 query 参数）
+// 需要统计的 LLM API 路径（主流文本生成/嵌入服务）
+// OpenAI/兼容格式: /v1/chat/completions, /v1/completions, /v1/embeddings
+// Anthropic格式: /v1/messages
 var llmStatPaths = map[string]bool{
-	"/v1/chat/completions": true,
-	"/v1/messages":         true,
-	"/v1/embeddings":       true,
+	"/v1/chat/completions": true, // ChatGPT风格对话（主流）
+	"/v1/completions":      true, // 旧版补全（部分服务仍用）
+	"/v1/messages":         true, // Anthropic风格
+	"/v1/embeddings":       true, // 向量嵌入
 }
 
-// matchLLMPath 判断路径是否需要深度统计
+// matchLLMPath 判断路径是否需要统计
 func matchLLMPath(path string) (pathOnly string, shouldStat bool) {
 	// 去掉 query 参数
 	if idx := strings.IndexByte(path, '?'); idx >= 0 {
@@ -68,24 +71,34 @@ func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *co
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 	}
 
-	reqHeaders := map[string]string{"model": "", ":path": "", "Authorization": ""}
+	reqHeaders := map[string]string{"model": "", ":path": "", ":method": "", "Authorization": ""}
 	util.GetHeaders(headers, reqHeaders)
 
-	reqCtx.Model = reqHeaders["model"]
+	// 第一步：只处理 POST 请求，其他方法直接跳过
+	method := reqHeaders[":method"]
+	if method != "POST" {
+		reqCtx.ShouldStat = false
+		fmt.Printf("[跳过] method: [%s], path: [%s] (非POST请求)\n", method, reqHeaders[":path"])
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
+	}
+
+	// 第二步：判断路径是否为LLM统计路径
 	reqCtx.Path = reqHeaders[":path"]
 	reqCtx.PathOnly, reqCtx.ShouldStat = matchLLMPath(reqCtx.Path)
+	if !reqCtx.ShouldStat {
+		fmt.Printf("[跳过] method: [POST], path: [%s] (非LLM统计路径)\n", reqCtx.Path)
+		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
+	}
 
+	// 第三步：提取 model 和 Authorization（仅在需要统计时）
+	reqCtx.Model = reqHeaders["model"]
 	auth := strings.Split(reqHeaders["Authorization"], " ")
 	if len(auth) > 1 {
 		reqCtx.SK = auth[1]
 	}
 
-	if reqCtx.ShouldStat {
-		fmt.Printf("[LLM统计] model: [%s], path: [%s], pathOnly: [%s], sk: [%s]\n",
-			reqCtx.Model, reqCtx.Path, reqCtx.PathOnly, reqCtx.SK)
-	} else {
-		fmt.Printf("[跳过] path: [%s] (非LLM统计路径)\n", reqCtx.Path)
-	}
+	fmt.Printf("[LLM统计] model: [%s], path: [%s], pathOnly: [%s], sk: [%s]\n",
+		reqCtx.Model, reqCtx.Path, reqCtx.PathOnly, reqCtx.SK)
 
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 }
