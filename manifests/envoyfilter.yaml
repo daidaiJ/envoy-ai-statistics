@@ -9,55 +9,9 @@ spec:
   # 工作负载选择器：匹配带有 inference=true label 的服务
   workloadSelector:
     labels:
-      inference: "true"
+      maas: "inference"
   
   configPatches:
-    # 1. 配置 ext_proc gRPC cluster
-    - applyTo: CLUSTER
-      patch:
-        operation: ADD
-        value:
-          name: llm-ext-proc-cluster
-          type: STATIC
-          connect_timeout: 5s
-          typed_extension_protocol_options:
-            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-              explicit_http_config:
-                http2_protocol_options: {}
-          load_assignment:
-            cluster_name: llm-ext-proc-cluster
-            endpoints:
-              - lb_endpoints:
-                  - endpoint:
-                      address:
-                        socket_address:
-                          address: llm-ext-proc.istio-system.svc.cluster.local
-                          port_value: 8888
-
-    # 2. 配置路由规则：只匹配 POST 方法（不限制路径）
-    - applyTo: ROUTE_CONFIGURATION
-      match:
-        context: SIDECAR_INBOUND
-      patch:
-        operation: MERGE
-        value:
-          virtual_hosts:
-            - name: llm-inference
-              domains:
-                - "*"
-              routes:
-                - match:
-                    prefix: "/"            # 匹配所有路径
-                    method: POST           # ✅ 只匹配 POST 方法
-                  route:
-                    cluster: ""
-                  typed_per_filter_config:
-                    envoy.filters.http.ext_proc:
-                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
-                      disabled: false
-
-    # 3. 插入 ext_proc HTTP filter
     - applyTo: HTTP_FILTER
       match:
         context: SIDECAR_INBOUND
@@ -69,7 +23,8 @@ spec:
             "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
             grpc_service:
               envoy_grpc:
-                cluster_name: llm-ext-proc-cluster
+                cluster_name: outbound|8888||llm-ext-proc.istio-system.svc.cluster.local
+                authority: llm-ext-proc.istio-system.svc.cluster.local
             processing_mode:
               request_header_mode: SEND      # 发送请求头
               request_body_mode: NONE        # 不发送请求体
