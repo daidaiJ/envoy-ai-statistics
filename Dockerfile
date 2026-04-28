@@ -3,7 +3,7 @@
 FROM docker.1ms.run/library/golang:1.24.13-alpine3.23 AS builder
 
 # 设置 Go 镜像源 (国内加速)
-RUN sed -i 's/https:\/\/dl-cdn.alpinelinux.org/https:\/\/mirrors.aliyun.com/g' /etc/apk/repositories && \
+RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories && apk update  && \
     go env -w GOPROXY=https://goproxy.cn,direct && \
     go env -w GOSUMDB=off
 

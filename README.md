@@ -115,6 +115,7 @@ kubectl label pod <inference-pod> inference=true
 ```
 
 ## EnvoyFilter 配置说明
+> 老版本的istio 1.18 的使用[1.18适配版本](./manifests/envoyfilter_v1.18.yaml)
 
 | 配置项 | 值 | 说明 |
 |--------|-----|------|
