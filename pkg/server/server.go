@@ -26,12 +26,14 @@ func NewExtProcServer() *ExtProcServer {
 
 // Process 每个请求一个 stream，天然隔离并发
 func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
+	fmt.Println("[ext_proc] === 新 gRPC stream 连接建立 ===")
 	reqCtx := usage.NewRequestCtx()
 	ctx := usage.ContextWithRequestCtx(stream.Context(), reqCtx)
 
 	for {
 		req, err := stream.Recv()
 		if err != nil {
+			fmt.Printf("[ext_proc] stream 结束: %v\n", err)
 			return err
 		}
 
@@ -39,16 +41,23 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 
 		switch r := req.Request.(type) {
 		case *extprocv3.ProcessingRequest_RequestHeaders:
+			fmt.Println("[ext_proc] 收到 RequestHeaders")
 			resp, _ = s.processor.ProcessRequestHeaders(ctx, r.RequestHeaders.Headers)
 		case *extprocv3.ProcessingRequest_RequestBody:
+			fmt.Println("[ext_proc] 收到 RequestBody")
 			resp, _ = s.processor.ProcessRequestBody(ctx, r.RequestBody)
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
+			fmt.Println("[ext_proc] 收到 ResponseHeaders")
 			resp, _ = s.processor.ProcessResponseHeaders(ctx, r.ResponseHeaders.Headers)
 		case *extprocv3.ProcessingRequest_ResponseBody:
+			fmt.Printf("[ext_proc] 收到 ResponseBody (len=%d, end_of_stream=%v)\n", len(r.ResponseBody.Body), r.ResponseBody.EndOfStream)
 			resp, _ = s.processor.ProcessResponseBody(ctx, r.ResponseBody)
+		default:
+			fmt.Printf("[ext_proc] 收到未知请求类型: %T\n", req.Request)
 		}
 
 		if err := stream.Send(resp); err != nil {
+			fmt.Printf("[ext_proc] 发送响应失败: %v\n", err)
 			return err
 		}
 	}
