@@ -1,0 +1,62 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: llm-usage-ext-proc
+  namespace: istio-system
+spec:
+  workloadSelector:
+    labels:
+      maas: "inference"
+
+  configPatches:
+    # 1. 定义 ext_proc gRPC cluster
+    - applyTo: CLUSTER
+      patch:
+        operation: ADD
+        value:
+          name: llm-ext-proc-cluster
+          type: STRICT_DNS
+          connect_timeout: 5s
+          lb_policy: ROUND_ROBIN
+          dns_lookup_family: V4_ONLY
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: llm-ext-proc-cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: llm-ext-proc.istio-system.svc.cluster.local
+                          port_value: 8888
+    - applyTo: HTTP_FILTER
+      match:
+        context: SIDECAR_INBOUND
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.ext_proc
+          typed_config:
+            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
+            type_url: "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor"
+            value:
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: llm-ext-proc-cluster
+              processing_mode:
+                request_header_mode: SEND      # 发送请求头
+                request_body_mode: NONE        # 不发送请求体
+                response_header_mode: NONE     # 不发送响应头
+                response_body_mode: STREAMED   # 流式模式，避免 buffer 内存占用
+              message_timeout: 30s
+              failure_mode_allow: true         # ext_proc 失败时透传流量
