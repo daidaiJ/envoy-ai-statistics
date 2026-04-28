@@ -29,6 +29,7 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 	fmt.Println("[ext_proc] === 新 gRPC stream 连接建立 ===")
 	reqCtx := usage.NewRequestCtx()
 	ctx := usage.ContextWithRequestCtx(stream.Context(), reqCtx)
+	defer reqCtx.Release() // 确保对象放回池中
 
 	for {
 		req, err := stream.Recv()
