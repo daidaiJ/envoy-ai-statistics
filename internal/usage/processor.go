@@ -20,6 +20,8 @@ var llmStatPaths = map[string]bool{
 	"/v1/embeddings":       true, // 向量嵌入
 }
 
+var reqHeaders = map[string]string{":path": "", ":method": "", "authorization": ""}
+
 // matchLLMPath 判断路径是否需要统计
 func matchLLMPath(path string) (pathOnly string, shouldStat bool) {
 	// 去掉 query 参数
@@ -71,7 +73,6 @@ func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *co
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 	}
 
-	reqHeaders := map[string]string{"model": "", ":path": "", ":method": "", "Authorization": ""}
 	util.GetHeaders(headers, reqHeaders)
 
 	// 第一步：只处理 POST 请求，其他方法直接跳过
@@ -90,34 +91,18 @@ func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *co
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 	}
 
-	// 第三步：提取 model 和 Authorization（仅在需要统计时）
-	reqCtx.Model = reqHeaders["model"]
-	auth := strings.Split(reqHeaders["Authorization"], " ")
+	auth := strings.Split(reqHeaders["authorization"], " ")
 	if len(auth) > 1 {
 		reqCtx.SK = auth[1]
 	}
 
-	fmt.Printf("[LLM统计] model: [%s], path: [%s], pathOnly: [%s], sk: [%s]\n",
-		reqCtx.Model, reqCtx.Path, reqCtx.PathOnly, reqCtx.SK)
+	fmt.Printf("[LLM统计], path: [%s], sk: [%s],\n", reqCtx.Path, reqCtx.SK)
 
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 }
 
 // ProcessResponseHeaders 处理响应头
 func (r *RouterProcessor) ProcessResponseHeaders(ctx context.Context, headers *corev3.HeaderMap) (*extprocv3.ProcessingResponse, error) {
-	reqCtx := getRequestCtx(ctx)
-	if reqCtx == nil || !reqCtx.ShouldStat {
-		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{}}, nil
-	}
-
-	for _, h := range headers.GetHeaders() {
-		if h.GetKey() == "content-type" {
-			contentType := h.GetValue()
-			reqCtx.IsStreaming = strings.Contains(contentType, "text/event-stream")
-			fmt.Printf("[LLM统计] 响应 Content-Type: %s (流式: %v)\n", contentType, reqCtx.IsStreaming)
-			break
-		}
-	}
 
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{}}, nil
 }
@@ -133,13 +118,8 @@ func (r *RouterProcessor) ProcessResponseBody(ctx context.Context, body *extproc
 		reqCtx.recordBodyChunk(body.Body)
 	}
 
-	reqCtx.bodyMu.Lock()
-	reqCtx.bodyBuf = append(reqCtx.bodyBuf, body.Body...)
-	reqCtx.bodyMu.Unlock()
-
 	if body.EndOfStream {
 		reqCtx.printRecordedBody()
-		reqCtx.parseUsageFromSSE()
 	}
 
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseBody{}}, nil

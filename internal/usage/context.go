@@ -28,12 +28,8 @@ type RequestCtx struct {
 	IsStreaming bool
 	ShouldStat  bool // 是否需要深度统计（路径匹配时为 true）
 
-	// 响应体累积
-	bodyBuf []byte
-	bodyMu  sync.Mutex
-
 	// 记录最近的 body chunks（最多2个，滚动更新）
-	recentChunks [2]string
+	recentChunks [2][]byte
 	chunkIndex   int
 }
 
@@ -54,15 +50,8 @@ func (ctx *RequestCtx) Release() {
 	ctx.IsStreaming = false
 	ctx.ShouldStat = false
 	ctx.chunkIndex = 0
-	ctx.recentChunks[0] = ""
-	ctx.recentChunks[1] = ""
-
-	// bodyBuf: 保留容量但重置长度；过大则丢弃让 GC 回收
-	if cap(ctx.bodyBuf) > bodyBufMaxRetainSize {
-		ctx.bodyBuf = nil
-	} else {
-		ctx.bodyBuf = ctx.bodyBuf[:0]
-	}
+	ctx.recentChunks[0] = nil
+	ctx.recentChunks[1] = nil
 
 	requestCtxPool.Put(ctx)
 }

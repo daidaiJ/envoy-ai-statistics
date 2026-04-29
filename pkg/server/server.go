@@ -5,10 +5,11 @@ import (
 	"math"
 	"net"
 
+	"tokenusage/internal/usage"
+
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	"tokenusage/internal/usage"
 )
 
 // ExtProcServer 实现 gRPC stream 处理
@@ -51,7 +52,6 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 			fmt.Println("[ext_proc] 收到 ResponseHeaders")
 			resp, _ = s.processor.ProcessResponseHeaders(ctx, r.ResponseHeaders.Headers)
 		case *extprocv3.ProcessingRequest_ResponseBody:
-			fmt.Printf("[ext_proc] 收到 ResponseBody (len=%d, end_of_stream=%v)\n", len(r.ResponseBody.Body), r.ResponseBody.EndOfStream)
 			resp, _ = s.processor.ProcessResponseBody(ctx, r.ResponseBody)
 		default:
 			fmt.Printf("[ext_proc] 收到未知请求类型: %T\n", req.Request)

@@ -4,27 +4,27 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"tokenusage/internal/resp"
 )
+
+const maxLen = 1024
 
 // recordBodyChunk 记录 body 原始字符串（最多两个，滚动更新）
 func (ctx *RequestCtx) recordBodyChunk(body []byte) {
-	ctx.bodyMu.Lock()
-	defer ctx.bodyMu.Unlock()
 
-	maxLen := 1000
-	bodyStr := string(body)
-	if len(bodyStr) > maxLen {
-		bodyStr = bodyStr[:maxLen] + "...(truncated)"
+	if len(body) > maxLen {
+		body = body[:maxLen]
 	}
-
-	ctx.recentChunks[ctx.chunkIndex%2] = bodyStr
+	bodybuf := bytes.Clone(body)
+	ctx.recentChunks[ctx.chunkIndex%2] = bodybuf
 	ctx.chunkIndex++
+	if ctx.chunkIndex > 1 {
+		ctx.IsStreaming = true
+	}
 }
 
 // printRecordedBody 在 EndOfStream 时打印记录的 body 内容
 func (ctx *RequestCtx) printRecordedBody() {
-	ctx.bodyMu.Lock()
-	defer ctx.bodyMu.Unlock()
 
 	streamType := "非流式"
 	if ctx.IsStreaming {
@@ -44,28 +44,17 @@ func (ctx *RequestCtx) printRecordedBody() {
 		if idx < 0 {
 			idx += 2
 		}
-		fmt.Printf("--- Chunk %d ---\n%s\n", i+1, ctx.recentChunks[idx])
+		fmt.Printf("--- Chunk %d ---\n[%s]\n---------", i+1, string(ctx.recentChunks[idx]))
+		ctx.parseUsageFromSSE(ctx.recentChunks[idx])
 	}
 
-	if len(ctx.bodyBuf) > 0 {
-		fmt.Printf("\n--- 完整响应体 ---\n")
-		fmt.Printf("%s\n", string(ctx.bodyBuf))
-	}
 	fmt.Printf("============================\n\n")
 }
 
 // parseUsageFromSSE 从 SSE 数据中解析带 usage 字段的报文
-func (ctx *RequestCtx) parseUsageFromSSE() {
-	ctx.bodyMu.Lock()
-	defer ctx.bodyMu.Unlock()
+func (ctx *RequestCtx) parseUsageFromSSE(body []byte) {
 
-	if len(ctx.bodyBuf) == 0 {
-		return
-	}
-
-	fmt.Printf("\n========== Usage 信息 ==========\n")
-
-	lines := bytes.Split(ctx.bodyBuf, []byte("\n"))
+	lines := bytes.Split(body, []byte("\n"))
 	for _, line := range lines {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data: ")) {
@@ -78,16 +67,14 @@ func (ctx *RequestCtx) parseUsageFromSSE() {
 			continue
 		}
 
-		var chunk map[string]any
-		if err := json.Unmarshal(jsonPart, &chunk); err != nil {
+		chunk := &resp.OpenAIResp{}
+		if err := json.Unmarshal(jsonPart, chunk); err != nil {
 			continue
 		}
 
-		if usage, ok := chunk["usage"].(map[string]any); ok {
-			usageJSON, _ := json.MarshalIndent(usage, "", "  ")
-			fmt.Printf("发现 usage: %s\n", string(usageJSON))
+		if chunk.GetInputToken() > 0 {
+			fmt.Printf("[Usage] %s\n", chunk)
 		}
 	}
 
-	fmt.Printf("================================\n")
 }
