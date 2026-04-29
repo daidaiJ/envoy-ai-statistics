@@ -1,0 +1,21 @@
+[ext_proc] === 新 gRPC stream 连接建立 ===
+[ext_proc] 收到 RequestHeaders
+[LLM统计], path: [/v1/chat/completions], sk: [sk-XZmVMI95HFGxReHnmgYHKRURmDfTPhPevRrDQQvj5qqse5QC],
+[ext_proc] 收到 ResponseHeaders
+
+========== 响应结束 ==========
+响应格式: 流式
+最近的 body chunks:
+--- Chunk 1 ---
+[data: {"id":"chatcmpl-1cb21826-a459-4bd2-b0f3-4cf53c012723","object":"chat.completion.chunk","created":1777434167,"model":"Qwen2.5-0.5B","choices":[{"index":0,"delta":{"content":"。"},"logprobs":null,"finish_reason":null}]}
+
+------------
+Chunk 2 ---
+[data: {"id":"chatcmpl-1cb21826-a459-4bd2-b0f3-4cf53c012723","object":"chat.completion.chunk","created":1777434167,"model":"Qwen2.5-0.5B","choices":[{"index":0,"delta":{"content":""},"logprobs":null,"finish_reason":"stop","stop_reason":null}]}
+
+data: {"id":"chatcmpl-1cb21826-a459-4bd2-b0f3-4cf53c012723","object":"chat.completion.chunk","created":1777434167,"model":"Qwen2.5-0.5B","choices":[],"usage":{"prompt_tokens":37,"total_tokens":60,"completion_tokens":23}}
+data: [DONE]
+
+---------[Usage] Model: Qwen2.5-0.5B | Input: 37 | Output: 23 | Cached: 0 | Total: 60
+============================
+[ext_proc] stream 结束: rpc error: code = Canceled desc = context canceled

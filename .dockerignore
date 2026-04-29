@@ -23,7 +23,8 @@ logs/
 *.md
 !README.md
 docs/
-
+*.tar
+*.txt
 # Test files
 *_test.go
 test/
