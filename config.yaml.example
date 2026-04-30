@@ -1,0 +1,14 @@
+# Redis 配置
+redis:
+  addr: "localhost:6379"
+  password: ""      # Redis 密码
+  db: 0             # Redis 数据库编号
+
+# 聚合器配置
+aggregator:
+  stream_key: "llm:usage"      # Redis Stream Key
+  window_duration: "30s"       # 聚合窗口时长
+
+# 日志配置
+log:
+  level: "info"     # debug, info, warn, error

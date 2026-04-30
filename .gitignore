@@ -1,1 +1,6 @@
 *.tar
+**/.*
+
+# 但不要忽略 .gitignore 本身
+!.gitignore
+!.dockerignore

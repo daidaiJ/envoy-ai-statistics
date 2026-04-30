@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"tokenusage/internal/usage"
+	"tokenusage/pkg/logger"
 
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
@@ -27,7 +28,7 @@ func NewExtProcServer() *ExtProcServer {
 
 // Process 每个请求一个 stream，天然隔离并发
 func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
-	fmt.Println("[ext_proc] === 新 gRPC stream 连接建立 ===")
+	logger.Debug("新gRPC stream连接建立")
 	reqCtx := usage.NewRequestCtx()
 	ctx := usage.ContextWithRequestCtx(stream.Context(), reqCtx)
 	defer reqCtx.Release() // 确保对象放回池中
@@ -35,7 +36,7 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 	for {
 		req, err := stream.Recv()
 		if err != nil {
-			fmt.Printf("[ext_proc] stream 结束: %v\n", err)
+			logger.Debug("stream结束", "error", err)
 			return err
 		}
 
@@ -43,22 +44,22 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 
 		switch r := req.Request.(type) {
 		case *extprocv3.ProcessingRequest_RequestHeaders:
-			fmt.Println("[ext_proc] 收到 RequestHeaders")
+			logger.Debug("收到RequestHeaders")
 			resp, _ = s.processor.ProcessRequestHeaders(ctx, r.RequestHeaders.Headers)
 		case *extprocv3.ProcessingRequest_RequestBody:
-			fmt.Println("[ext_proc] 收到 RequestBody")
+			logger.Debug("收到RequestBody")
 			resp, _ = s.processor.ProcessRequestBody(ctx, r.RequestBody)
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
-			fmt.Println("[ext_proc] 收到 ResponseHeaders")
+			logger.Debug("收到ResponseHeaders")
 			resp, _ = s.processor.ProcessResponseHeaders(ctx, r.ResponseHeaders.Headers)
 		case *extprocv3.ProcessingRequest_ResponseBody:
 			resp, _ = s.processor.ProcessResponseBody(ctx, r.ResponseBody)
 		default:
-			fmt.Printf("[ext_proc] 收到未知请求类型: %T\n", req.Request)
+			logger.Warn("收到未知请求类型", "type", fmt.Sprintf("%T", req.Request))
 		}
 
 		if err := stream.Send(resp); err != nil {
-			fmt.Printf("[ext_proc] 发送响应失败: %v\n", err)
+			logger.Error("发送响应失败", "error", err)
 			return err
 		}
 	}
@@ -79,6 +80,6 @@ func StartServer(addr string) error {
 	extprocv3.RegisterExternalProcessorServer(srv, NewExtProcServer())
 	grpc_health_v1.RegisterHealthServer(srv, NewHealthServer())
 
-	fmt.Printf("ext_proc server started on %s\n", addr)
+	logger.Info("ext_proc server started", "addr", addr)
 	return srv.Serve(listen)
 }
