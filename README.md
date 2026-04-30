@@ -190,11 +190,12 @@ aggregator:
 | `model` | 模型名称 |
 | `input_tokens` | 窗口内累计输入 token |
 | `output_tokens` | 窗口内累计输出 token |
-| `cached_tokens` | 窯口内累计缓存 token |
+| `cached_tokens` | 窗口内累计缓存 token |
 | `count` | 窗口内请求次数 |
 | `window_start` | 窗口内第一条记录时间（RFC3339Nano） |
 | `window_end` | 窗口内最后一条记录时间（RFC3339Nano） |
 | `sent_at` | 推送时间（RFC3339Nano） |
+| `inf_svc_id` | 推理服务 ID（从 maas-inference-service header 提取） |
 
 ### 示例输出
 
@@ -224,9 +225,23 @@ XAdd success sk=sk-abc123 model=gpt-4 input_tokens=150 output_tokens=80 cached_t
 
 ### 并发安全
 
-- 内存聚合表使用 `sync.RWMutex` 保护
-- `Record()` 操作非阻塞，不影响请求处理性能
+- 内存聚合表使用 `sync.Mutex` 保护
+- `Record()` 操作异步非阻塞：通过 buffered channel 解耦，避免锁阻塞调用方
+- 单一消费者 goroutine 串行处理记录，最小化锁竞争
 - flush 时取出当前窗口数据后立即释放锁，新请求写入新的聚合表
+- channel 满时丢弃记录并记录日志，保证服务不阻塞
+
+### 更新日志
+
+#### 2025-04-30
+
+- **Record 改为 channel 异步模式**：避免高并发时锁阻塞响应处理
+  - 新增 `recordCh`（容量 10000）作为异步缓冲
+  - `Record()` 使用 `select + default` 非阻塞发送，channel 满时丢弃记录
+  - 单独的 `consumeRecords` goroutine 消费记录，串行更新 map
+  - **批量处理优化**：凑满 100 条或 channel 空时批量处理，一次加锁处理多条记录
+  - `Stop()` 时消费完剩余记录，确保优雅关闭
+- **支持推理服务 ID**：聚合键增加 `inf_svc_id` 字段，从 `maas-inference-service` header 提取
 
 ## 日志控制
 

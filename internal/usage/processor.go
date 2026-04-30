@@ -20,7 +20,7 @@ var llmStatPaths = map[string]bool{
 	"/v1/embeddings":       true, // 向量嵌入
 }
 
-var reqHeaders = map[string]string{":path": "", ":method": "", "authorization": ""}
+var reqHeaders = map[string]string{":path": "", ":method": "", "authorization": "", "maas-inference-service": ""}
 
 // matchLLMPath 判断路径是否需要统计
 func matchLLMPath(path string) (pathOnly string, shouldStat bool) {
@@ -96,8 +96,8 @@ func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *co
 	if len(auth) > 1 {
 		reqCtx.SK = auth[1]
 	}
-
-	logger.Debug("LLM请求统计", "path", reqCtx.Path, "sk", reqCtx.SK)
+	reqCtx.InferenceId = reqHeaders["maas-inference-service"]
+	logger.Debug("LLM请求统计", "path", reqCtx.Path, "sk", reqCtx.SK, "maas-inference-service", reqCtx.InferenceId)
 
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 }
