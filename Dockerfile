@@ -32,6 +32,7 @@ RUN apk add --no-cache \
 WORKDIR /app
 COPY --from=builder /app/ext-proc .
 COPY scripts/debug.sh .
+COPY config.yaml .
 RUN chmod +x debug.sh
 
 EXPOSE 8888 
