@@ -22,9 +22,9 @@ var requestCtxPool = sync.Pool{
 type RequestCtx struct {
 	Model       string
 	Path        string
-	PathOnly    string // 路径部分（不含 query）
+	PathOnly    string // 路径部分（不含 query）以防万一
 	SK          string
-	RequestID   string
+	InferenceId string // 推理服务id
 	IsStreaming bool
 	ShouldStat  bool // 是否需要深度统计（路径匹配时为 true）
 
@@ -46,7 +46,7 @@ func (ctx *RequestCtx) Release() {
 	ctx.Path = ""
 	ctx.PathOnly = ""
 	ctx.SK = ""
-	ctx.RequestID = ""
+	ctx.InferenceId = ""
 	ctx.IsStreaming = false
 	ctx.ShouldStat = false
 	ctx.chunkIndex = 0

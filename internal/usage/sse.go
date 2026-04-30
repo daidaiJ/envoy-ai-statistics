@@ -88,10 +88,11 @@ func (ctx *RequestCtx) parseUsageFromSSE(body []byte) {
 				"output_tokens", chunk.GetOutputToken(),
 				"cached_tokens", chunk.GetCachedToken(),
 				"sk", ctx.SK,
+				"maas-inference-service", ctx.InferenceId,
 			)
 			// 调用聚合器记录 usage
 			if defaultAggregator != nil {
-				defaultAggregator.Record(ctx.SK, chunk.GetModel(),
+				defaultAggregator.Record(ctx.InferenceId, ctx.SK, chunk.GetModel(),
 					chunk.GetInputToken(), chunk.GetOutputToken(), chunk.GetCachedToken())
 			} else {
 				logger.Warn("聚合器未初始化，无法记录usage")
