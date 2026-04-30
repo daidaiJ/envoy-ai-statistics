@@ -7,6 +7,7 @@ redis:
 # 聚合器配置
 aggregator:
   stream_key: "llm:usage"      # Redis Stream Key
+  stream_max_len: 10000        # Stream 最大长度（近似裁剪）
   window_duration: "30s"       # 聚合窗口时长
 
 # 日志配置
