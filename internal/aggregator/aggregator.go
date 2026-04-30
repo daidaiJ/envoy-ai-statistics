@@ -230,7 +230,7 @@ func (a *Aggregator) flush() {
 			"inf_svc_id":    key.InfSvcId,
 		}
 
-		if err := a.redisClient.XAdd(ctx, a.config.Aggr.StreamKey, fields); err != nil {
+		if err := a.redisClient.XAdd(ctx, a.config.Aggr.StreamKey, fields, a.config.Aggr.StreamMaxLen); err != nil {
 			logger.Error("XAdd failed", "error", err, "sk", key.SK, "inf_svc_id", key.InfSvcId)
 			// 推送失败，数据放回下一个窗口
 			a.mu.Lock()

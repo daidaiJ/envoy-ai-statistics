@@ -30,6 +30,7 @@ type RedisConfig struct {
 // AggrConfig 聚合器配置
 type AggrConfig struct {
 	StreamKey      string        `yaml:"stream_key"`       // Redis Stream Key
+	StreamMaxLen   int64         `yaml:"stream_max_len"`   // Redis Stream 最大长度，近似裁剪
 	WindowDuration time.Duration `yaml:"window_duration"`  // 聚合窗口时长，如 "30s"
 }
 
@@ -55,6 +56,9 @@ func Load(configPath string) (*Config, error) {
 	}
 	if cfg.Aggr.StreamKey == "" {
 		cfg.Aggr.StreamKey = "llm:usage"
+	}
+	if cfg.Aggr.StreamMaxLen == 0 {
+		cfg.Aggr.StreamMaxLen = 10000
 	}
 	if cfg.Aggr.WindowDuration == 0 {
 		cfg.Aggr.WindowDuration = 30 * time.Second
@@ -84,6 +88,7 @@ func (c *Config) String() string {
     DB: %d
   Aggregator:
     StreamKey: %s
+    StreamMaxLen: %d
     WindowDuration: %v
   Log:
     Level: %s`,
@@ -91,6 +96,7 @@ func (c *Config) String() string {
 		password,
 		c.Redis.DB,
 		c.Aggr.StreamKey,
+		c.Aggr.StreamMaxLen,
 		c.Aggr.WindowDuration,
 		c.Log.Level,
 	)

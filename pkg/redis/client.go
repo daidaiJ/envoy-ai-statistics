@@ -35,10 +35,12 @@ func NewClient(cfg *config.Config) (*Client, error) {
 }
 
 // XAdd 向 Redis Stream 添加消息
-func (c *Client) XAdd(ctx context.Context, streamKey string, fields map[string]interface{}) error {
+func (c *Client) XAdd(ctx context.Context, streamKey string, fields map[string]interface{}, maxLen int64) error {
 	return c.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: streamKey,
 		Values: fields,
+		MaxLen: maxLen,
+		Approx: true, // 使用近似裁剪，提高性能
 	}).Err()
 }
 
