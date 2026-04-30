@@ -31,8 +31,10 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 COPY --from=builder /app/ext-proc .
+COPY scripts/debug.sh .
+RUN chmod +x debug.sh
 
-EXPOSE 8888
+EXPOSE 8888 
 # HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 #     CMD grpc_health_probe -addr=:8888 || exit 1
 

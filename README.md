@@ -9,22 +9,30 @@
 - **Usage 解析**：从 SSE 数据中提取 token 使用量
 - **故障透传**：ext_proc 服务异常时流量正常转发，不影响业务
 - **并发安全**：每个请求独立的 gRPC stream，天然隔离
+- **动态日志**：运行时可通过 HTTP API 动态调整日志等级
 
 ## 项目结构
 
 ```
 ext-proc/
-├── cmd/main.go              # 入口文件，启动 gRPC 服务器
+├── cmd/main.go              # 入口文件，启动 gRPC + HTTP 服务器
+├── config/config.go         # 配置加载 + 安全打印
 ├── internal/
 │   ├── usage/
 │   │   ├── context.go       # RequestCtx 请求上下文定义
 │   │   ├── processor.go     # Processor 接口 + RouterProcessor 实现
 │   │   └── sse.go           # SSE 解析 + body 记录
+│   ├── aggregator/          # 时间窗口聚合器，推送 Redis Stream
 │   └── util/
 │       └── headers.go       # HeaderMap 提取工具函数
-├── pkg/server/
-│   ├── server.go            # ExtProcServer + gRPC stream 处理
-│   └── health.go            # gRPC 健康检查
+├── pkg/
+│   ├── logger/              # 动态日志等级控制（slog + zerolog）
+│   ├── server/
+│   │   ├── server.go        # ExtProcServer + gRPC stream 处理
+│   │   ├── health.go        # gRPC 健康检查
+│   │   └── loglevel.go      # HTTP 日志等级 API
+│   └── redis/               # Redis 客户端封装
+├── scripts/debug.sh         # 容器内日志等级控制脚本
 ├── manifests/
 │   ├── deployment.yaml      # Kubernetes Deployment + Service
 │   └── envoyfilter.yaml     # Istio EnvoyFilter CR
@@ -35,11 +43,16 @@ ext-proc/
 
 ### cmd/main.go
 
-程序入口，解析命令行参数并启动 gRPC 服务器。
+程序入口，解析命令行参数并启动 gRPC 服务器和 HTTP 服务。
 
 ```bash
 # 本地运行
-go run ./cmd -addr :8888
+go run ./cmd -addr :8888 -http-addr :8889
+
+# 参数说明
+# -addr       : gRPC 服务地址（默认 0.0.0.0:8888）
+# -http-addr  : HTTP 服务地址，用于日志等级控制（默认 0.0.0.0:8889）
+# -config     : 配置文件路径（默认 config.yaml）
 ```
 
 ### internal/usage/context.go
@@ -78,6 +91,32 @@ Envoy HeaderMap 提取工具：
 - `GetHeaders()`：从 HeaderMap 批量提取指定 header
 - `IsContains()`：判断 map 是否包含指定 key
 
+### internal/aggregator/aggregator.go
+
+时间窗口聚合器，将 usage 数据聚合后推送到 Redis Stream：
+
+- `AggregateKey`：聚合键（SK + Model 组合）
+- `AggregateValue`：聚合值（token 数量、请求次数、时间窗口）
+- `Record()`：非阻塞记录 usage 数据到内存聚合表
+- `flush()`：定时推送聚合数据到 Redis Stream
+- `Start()/Stop()`：启动定时器、优雅停止（确保剩余数据 flush）
+
+### pkg/logger/logger.go
+
+动态日志等级控制：
+
+- 基于 slog 标准接口 + zerolog ConsoleWriter
+- 支持 caller 信息（文件名:行号）
+- 时区从 `TZ` 或 `TIMEZONE` 环境变量加载
+- `SetLevel()`：运行时动态切换等级
+
+### pkg/server/loglevel.go
+
+HTTP 日志等级 API：
+
+- `GET /log/level`：获取当前日志等级
+- `PUT /log/level`：设置日志等级
+
 ### pkg/server/server.go
 
 gRPC 服务器：
@@ -112,6 +151,142 @@ kubectl apply -f manifests/envoyfilter.yaml
 
 ```bash
 kubectl label pod <inference-pod> inference=true
+```
+
+## Usage 聚合机制
+
+### 设计目的
+
+将 LLM API 的 token usage 数据按时间窗口聚合后批量推送至 Redis Stream，避免每个请求单独推送带来的性能开销。
+
+### 工作流程
+
+```
+请求到达 → 解析 usage → 内存聚合表 → 定时 flush → Redis Stream
+                                           ↑
+                                    window_duration
+```
+
+1. **内存聚合**：按 `SK + Model` 组合为键，在内存中累积 token 数量和请求次数
+2. **定时推送**：每隔 `window_duration`（默认 30s）触发一次 flush
+3. **Redis Stream**：推送聚合后的数据到 `stream_key`（默认 `llm:usage`）
+4. **优雅停止**：服务关闭时确保剩余数据 flush 完成
+
+### 配置项
+
+```yaml
+aggregator:
+  stream_key: "llm:usage"      # Redis Stream Key
+  window_duration: "30s"       # 聚合窗口时长
+```
+
+### Redis Stream 数据结构
+
+每次 flush 推送一条消息，包含以下字段：
+
+| 字段 | 说明 |
+|------|------|
+| `sk` | API Key（Authorization 中提取） |
+| `model` | 模型名称 |
+| `input_tokens` | 窗口内累计输入 token |
+| `output_tokens` | 窗口内累计输出 token |
+| `cached_tokens` | 窯口内累计缓存 token |
+| `count` | 窗口内请求次数 |
+| `window_start` | 窗口内第一条记录时间（RFC3339Nano） |
+| `window_end` | 窗口内最后一条记录时间（RFC3339Nano） |
+| `sent_at` | 推送时间（RFC3339Nano） |
+
+### 示例输出
+
+```
+# Info 级别日志（每次推送）
+XAdd success sk=sk-abc123 model=gpt-4 input_tokens=150 output_tokens=80 cached_tokens=20 count=5
+
+# Redis Stream 消息内容
+{
+  "sk": "sk-abc123",
+  "model": "gpt-4",
+  "input_tokens": 150,
+  "output_tokens": 80,
+  "cached_tokens": 20,
+  "count": 5,
+  "window_start": "2024-01-15T10:00:00.123456789Z",
+  "window_end": "2024-01-15T10:00:25.987654321Z",
+  "sent_at": "2024-01-15T10:00:30.000000000Z"
+}
+```
+
+### 失败重试机制
+
+- **Redis 断联重试**：底层 go-redis 客户端配置 `MaxRetries=3`，自动重试连接
+- **推送失败保护**：flush 失败的数据放回下一个窗口继续累积，确保不丢失
+- **优雅停止**：服务关闭时执行最后一次 flush，确保所有数据推送完成
+
+### 并发安全
+
+- 内存聚合表使用 `sync.RWMutex` 保护
+- `Record()` 操作非阻塞，不影响请求处理性能
+- flush 时取出当前窗口数据后立即释放锁，新请求写入新的聚合表
+
+## 日志控制
+
+### 日志等级分布
+
+| 场景 | 等级 |
+|------|------|
+| 新请求用量、sk、path 等详细信息 | Debug |
+| 响应 SSE chunk 详情 | Debug |
+| XAdd 推送聚合数据到 Redis | Info |
+| 服务启动/关闭 | Info |
+| JSON 解析失败、请求上下文缺失 | Warn |
+| XAdd 推送失败、响应发送失败 | Error |
+
+### 配置文件
+
+在 `config.yaml` 中设置初始日志等级：
+
+```yaml
+log:
+  level: "info"  # debug, info, warn, error
+```
+
+### 动态调整（HTTP API）
+
+服务启动时默认在 `8889` 端口提供 HTTP API：
+
+```bash
+# 获取当前日志等级
+curl http://localhost:8889/log/level
+
+# 开启 debug 模式
+curl -X PUT http://localhost:8889/log/level -d '{"level":"debug"}'
+
+# 关闭 debug 模式
+curl -X PUT http://localhost:8889/log/level -d '{"level":"info"}'
+```
+
+### 容器内调试脚本
+
+容器内内置 `debug.sh` 脚本：
+
+```bash
+# 进入容器
+docker exec -it <container> sh
+
+# 开启 debug 模式（输出详细请求信息）
+./debug.sh on
+
+# 关闭 debug 模式
+./debug.sh off
+
+# 查看当前日志等级
+./debug.sh status
+```
+
+可通过环境变量 `HTTP_ADDR` 指定服务地址：
+
+```bash
+HTTP_ADDR=10.0.0.1:8889 ./debug.sh on
 ```
 
 ## EnvoyFilter 配置说明

@@ -2,9 +2,9 @@ package usage
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"tokenusage/internal/util"
+	"tokenusage/pkg/logger"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -70,6 +70,7 @@ type RouterProcessor struct {
 func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *corev3.HeaderMap) (*extprocv3.ProcessingResponse, error) {
 	reqCtx := getRequestCtx(ctx)
 	if reqCtx == nil {
+		logger.Warn("request context is nil")
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 	}
 
@@ -79,7 +80,7 @@ func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *co
 	method := reqHeaders[":method"]
 	if method != "POST" {
 		reqCtx.ShouldStat = false
-		fmt.Printf("[跳过] method: [%s], path: [%s] (非POST请求)\n", method, reqHeaders[":path"])
+		logger.Debug("跳过非POST请求", "method", method, "path", reqHeaders[":path"])
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 	}
 
@@ -87,7 +88,7 @@ func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *co
 	reqCtx.Path = reqHeaders[":path"]
 	reqCtx.PathOnly, reqCtx.ShouldStat = matchLLMPath(reqCtx.Path)
 	if !reqCtx.ShouldStat {
-		fmt.Printf("[跳过] method: [POST], path: [%s] (非LLM统计路径)\n", reqCtx.Path)
+		logger.Debug("跳过非LLM统计路径", "path", reqCtx.Path)
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 	}
 
@@ -96,7 +97,7 @@ func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *co
 		reqCtx.SK = auth[1]
 	}
 
-	fmt.Printf("[LLM统计], path: [%s], sk: [%s],\n", reqCtx.Path, reqCtx.SK)
+	logger.Debug("LLM请求统计", "path", reqCtx.Path, "sk", reqCtx.SK)
 
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 }

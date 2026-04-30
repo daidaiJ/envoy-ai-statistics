@@ -2,10 +2,20 @@ package usage
 
 import (
 	"bytes"
-	"encoding/json"
-	"fmt"
+
+	"tokenusage/internal/aggregator"
 	"tokenusage/internal/resp"
+	"tokenusage/pkg/json"
+	"tokenusage/pkg/logger"
 )
+
+// defaultAggregator 默认聚合器实例，由 main.go 初始化时设置
+var defaultAggregator *aggregator.Aggregator
+
+// SetAggregator 设置聚合器实例
+func SetAggregator(agg *aggregator.Aggregator) {
+	defaultAggregator = agg
+}
 
 const maxLen = 1024
 
@@ -30,9 +40,8 @@ func (ctx *RequestCtx) printRecordedBody() {
 	if ctx.IsStreaming {
 		streamType = "流式"
 	}
-	fmt.Printf("\n========== 响应结束 ==========\n")
-	fmt.Printf("响应格式: %s\n", streamType)
-	fmt.Printf("最近的 body chunks:\n")
+
+	logger.Debug("响应结束", "format", streamType, "path", ctx.Path, "sk", ctx.SK)
 
 	count := ctx.chunkIndex
 	if count > 2 {
@@ -44,11 +53,9 @@ func (ctx *RequestCtx) printRecordedBody() {
 		if idx < 0 {
 			idx += 2
 		}
-		fmt.Printf("--- Chunk %d ---\n[%s]\n---------", i+1, string(ctx.recentChunks[idx]))
+		logger.Debug("响应chunk", "index", i+1, "body", string(ctx.recentChunks[idx]))
 		ctx.parseUsageFromSSE(ctx.recentChunks[idx])
 	}
-
-	fmt.Printf("============================\n\n")
 }
 
 // parseUsageFromSSE 从 SSE 数据中解析带 usage 字段的报文
@@ -67,14 +74,30 @@ func (ctx *RequestCtx) parseUsageFromSSE(body []byte) {
 			continue
 		}
 
-		chunk := &resp.OpenAIResp{}
+		chunk := resp.GetResponser(ctx.Path)
 		if err := json.Unmarshal(jsonPart, chunk); err != nil {
+			logger.Warn("解析响应JSON失败", "error", err, "path", ctx.Path, "raw", string(jsonPart))
+			resp.PutResponser(chunk)
 			continue
 		}
 
 		if chunk.GetInputToken() > 0 {
-			fmt.Printf("[Usage] %s\n", chunk)
+			logger.Debug("Usage统计",
+				"model", chunk.GetModel(),
+				"input_tokens", chunk.GetInputToken(),
+				"output_tokens", chunk.GetOutputToken(),
+				"cached_tokens", chunk.GetCachedToken(),
+				"sk", ctx.SK,
+			)
+			// 调用聚合器记录 usage
+			if defaultAggregator != nil {
+				defaultAggregator.Record(ctx.SK, chunk.GetModel(),
+					chunk.GetInputToken(), chunk.GetOutputToken(), chunk.GetCachedToken())
+			} else {
+				logger.Warn("聚合器未初始化，无法记录usage")
+			}
 		}
+		resp.PutResponser(chunk)
 	}
 
 }
