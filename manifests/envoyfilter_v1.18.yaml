@@ -55,7 +55,7 @@ spec:
                   cluster_name: llm-ext-proc-cluster
               processing_mode:
                 request_header_mode: SEND      # 发送请求头
-                request_body_mode: NONE        # 不发送请求体
+                request_body_mode: BUFFERED        # 不发送请求体
                 response_header_mode: NONE     # 不发送响应头
                 response_body_mode: STREAMED   # 流式模式，避免 buffer 内存占用
               message_timeout: 30s

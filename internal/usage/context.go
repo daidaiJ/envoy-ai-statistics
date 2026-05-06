@@ -29,8 +29,9 @@ type RequestCtx struct {
 	ShouldStat  bool // 是否需要深度统计（路径匹配时为 true）
 
 	// 记录最近的 body chunks（最多2个，滚动更新）
-	recentChunks [2][]byte
+	recentChunks []byte
 	chunkIndex   int
+	Count        int
 }
 
 // NewRequestCtx 从对象池获取请求上下文（已重置）
@@ -50,8 +51,7 @@ func (ctx *RequestCtx) Release() {
 	ctx.IsStreaming = false
 	ctx.ShouldStat = false
 	ctx.chunkIndex = 0
-	ctx.recentChunks[0] = nil
-	ctx.recentChunks[1] = nil
+	ctx.recentChunks = nil
 
 	requestCtxPool.Put(ctx)
 }

@@ -2,6 +2,7 @@ package usage
 
 import (
 	"bytes"
+	"fmt"
 
 	"tokenusage/internal/aggregator"
 	"tokenusage/internal/resp"
@@ -17,7 +18,7 @@ func SetAggregator(agg *aggregator.Aggregator) {
 	defaultAggregator = agg
 }
 
-const maxLen = 1024
+const maxLen = 102400
 
 // recordBodyChunk 记录 body 原始字符串（最多两个，滚动更新）
 func (ctx *RequestCtx) recordBodyChunk(body []byte) {
@@ -26,9 +27,9 @@ func (ctx *RequestCtx) recordBodyChunk(body []byte) {
 		body = body[:maxLen]
 	}
 	bodybuf := bytes.Clone(body)
-	ctx.recentChunks[ctx.chunkIndex%2] = bodybuf
-	ctx.chunkIndex++
-	if ctx.chunkIndex > 1 {
+	ctx.recentChunks = bodybuf
+	ctx.Count++
+	if ctx.Count > 1 {
 		ctx.IsStreaming = true
 	}
 }
@@ -43,19 +44,10 @@ func (ctx *RequestCtx) printRecordedBody() {
 
 	logger.Debug("响应结束", "format", streamType, "path", ctx.Path, "sk", ctx.SK)
 
-	count := ctx.chunkIndex
-	if count > 2 {
-		count = 2
-	}
+	fmt.Printf("--- Chunk  ---\n[%s]\n---------", string(ctx.recentChunks))
+	ctx.parseUsageFromSSE(ctx.recentChunks)
 
-	for i := 0; i < count; i++ {
-		idx := (ctx.chunkIndex - count + i) % 2
-		if idx < 0 {
-			idx += 2
-		}
-		logger.Debug("响应chunk", "index", i+1, "body", string(ctx.recentChunks[idx]))
-		ctx.parseUsageFromSSE(ctx.recentChunks[idx])
-	}
+	fmt.Printf("============================\n\n")
 }
 
 // parseUsageFromSSE 从 SSE 数据中解析带 usage 字段的报文
@@ -64,7 +56,7 @@ func (ctx *RequestCtx) parseUsageFromSSE(body []byte) {
 	lines := bytes.Split(body, []byte("\n"))
 	for _, line := range lines {
 		line = bytes.TrimSpace(line)
-		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data: ")) {
+		if len(line) == 0 {
 			continue
 		}
 

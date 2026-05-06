@@ -9,8 +9,6 @@ import (
 	"runtime"
 	"sync"
 	"time"
-
-	"github.com/rs/zerolog"
 )
 
 // Level 动态日志等级
@@ -71,22 +69,6 @@ func (l Level) toSlogLevel() slog.Level {
 	}
 }
 
-// toZerologLevel 转换为 zerolog.Level
-func (l Level) toZerologLevel() zerolog.Level {
-	switch l {
-	case LevelDebug:
-		return zerolog.DebugLevel
-	case LevelInfo:
-		return zerolog.InfoLevel
-	case LevelWarn:
-		return zerolog.WarnLevel
-	case LevelError:
-		return zerolog.ErrorLevel
-	default:
-		return zerolog.InfoLevel
-	}
-}
-
 // dynamicHandler 支持动态等级切换的 slog.Handler
 type dynamicHandler struct {
 	mu       sync.RWMutex
@@ -110,15 +92,9 @@ func Init(level string) {
 	// 从环境变量加载时区
 	timezone := loadTimezone()
 
-	// 创建 zerolog ConsoleWriter（带颜色和时间格式）
-	zlWriter := zerolog.ConsoleWriter{
-		Out:        os.Stdout,
-		TimeFormat: "2006-01-02 15:04:05.000",
-	}
-
 	handler = &dynamicHandler{
 		level:    l,
-		writer:   zlWriter,
+		writer:   os.Stdout,
 		timezone: timezone,
 	}
 
