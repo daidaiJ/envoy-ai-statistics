@@ -7,6 +7,7 @@
 - **路径过滤**：只统计 `/v1/chat/completions`、`/v1/messages`、`/v1/embeddings` 路径
 - **流式支持**：自动识别流式（SSE）和非流式响应
 - **Usage 解析**：从 SSE 数据中提取 token 使用量
+- **流式请求体注入**：自动为流式请求注入 `stream_options={"include_usage": true}`，强制后端返回 usage（无需客户端修改）
 - **故障透传**：ext_proc 服务异常时流量正常转发，不影响业务
 - **并发安全**：每个请求独立的 gRPC stream，天然隔离
 - **动态日志**：运行时可通过 HTTP API 动态调整日志等级
@@ -26,7 +27,7 @@ ext-proc/
 │   └── util/
 │       └── headers.go       # HeaderMap 提取工具函数
 ├── pkg/
-│   ├── logger/              # 动态日志等级控制（slog + zerolog）
+│   ├── logger/              # 动态日志等级控制（slog 标准库）
 │   ├── server/
 │   │   ├── server.go        # ExtProcServer + gRPC stream 处理
 │   │   ├── health.go        # gRPC 健康检查
@@ -73,6 +74,7 @@ go run ./cmd -addr :8888 -http-addr :8889
 - `Processor` 接口：定义 ext_proc 四个阶段处理方法
 - `RouterProcessor`：LLM 统计处理器实现
   - `ProcessRequestHeaders`：提取 model、path、Authorization
+  - `ProcessRequestBody`：**拦截流式请求体，注入 `stream_options={"include_usage": true}`**（字节流直接修改，避免全量 JSON 序列化）
   - `ProcessResponseHeaders`：判断流式/非流式
   - `ProcessResponseBody`：累积响应体，EndOfStream 时解析
 
@@ -80,9 +82,10 @@ go run ./cmd -addr :8888 -http-addr :8889
 
 SSE 数据处理：
 
-- `recordBodyChunk()`：记录最近 2 个 body chunk（滚动更新）
-- `printRecordedBody()`：EndOfStream 时打印记录内容
+- `recordBodyChunk()`：记录最近 **1 个** body chunk（性能优化，减少内存占用）
+- `printRecordedBody()`：EndOfStream 时打印记录内容并解析 usage
 - `parseUsageFromSSE()`：解析 SSE 数据，提取 usage 字段
+- `maxLen = 102400`：单个 chunk 最大记录长度
 
 ### internal/util/headers.go
 
@@ -105,7 +108,7 @@ Envoy HeaderMap 提取工具：
 
 动态日志等级控制：
 
-- 基于 slog 标准接口 + zerolog ConsoleWriter
+- 基于 Go 标准库 `slog`，`os.Stdout` 输出
 - 支持 caller 信息（文件名:行号）
 - 时区从 `TZ` 或 `TIMEZONE` 环境变量加载
 - `SetLevel()`：运行时动态切换等级
@@ -233,15 +236,7 @@ XAdd success sk=sk-abc123 model=gpt-4 input_tokens=150 output_tokens=80 cached_t
 
 ### 更新日志
 
-#### 2025-04-30
-
-- **Record 改为 channel 异步模式**：避免高并发时锁阻塞响应处理
-  - 新增 `recordCh`（容量 10000）作为异步缓冲
-  - `Record()` 使用 `select + default` 非阻塞发送，channel 满时丢弃记录
-  - 单独的 `consumeRecords` goroutine 消费记录，串行更新 map
-  - **批量处理优化**：凑满 100 条或 channel 空时批量处理，一次加锁处理多条记录
-  - `Stop()` 时消费完剩余记录，确保优雅关闭
-- **支持推理服务 ID**：聚合键增加 `inf_svc_id` 字段，从 `maas-inference-service` header 提取
+详细更新日志请查看 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 日志控制
 
@@ -311,7 +306,7 @@ HTTP_ADDR=10.0.0.1:8889 ./debug.sh on
 |--------|-----|------|
 | `workloadSelector.labels` | `inference: true` | 只匹配推理服务 |
 | `processing_mode.request_header_mode` | `SEND` | 发送请求头 |
-| `processing_mode.request_body_mode` | `NONE` | 不发送请求体（减少开销） |
+| `processing_mode.request_body_mode` | `BUFFERED` | 缓冲请求体（支持拦截注入 `stream_options`） |
 | `processing_mode.response_header_mode` | `NONE` | 不发送响应头（减少开销） |
 | `processing_mode.response_body_mode` | `STREAMED` | 流式发送响应体（避免 OOM） |
 | `failure_mode_allow` | `true` | 服务故障时流量透传 |
@@ -324,14 +319,10 @@ HTTP_ADDR=10.0.0.1:8889 ./debug.sh on
 
 ========== 响应结束 ==========
 响应格式: 流式
-最近的 body chunks:
---- Chunk 1 ---
-data: {"choices":[{"delta":{"content":"Hello"}}]}
-
---- 完整响应体 ---
-data: {"choices":[...]}
+--- Chunk  ---
+[data: {"choices":[...]}
 data: {"usage":{"prompt_tokens":10,"completion_tokens":5}}
-data: [DONE]
+data: [DONE]]
 ============================
 
 ========== Usage 信息 ==========
