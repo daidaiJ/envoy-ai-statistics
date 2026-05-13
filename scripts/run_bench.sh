@@ -13,10 +13,11 @@ cd "$PROJECT_DIR"
 # ── 帮助信息 ──────────────────────────────────────────────────────────────
 usage() {
     cat <<'USAGE'
-Usage: scripts/run_bench.sh [command] [bench options]
+Usage: scripts/run_bench.sh [command] [options]
 
 Commands:
-  bench [options]   Run benchmark and generate report (default)
+  bench [options]   Run benchmark + correctness verification (default)
+  verify            Run correctness verification only
   clean             Remove generated test data and build artifacts
   help              Show this help message
 
@@ -25,22 +26,32 @@ Bench options (passed through to `go test -bench`):
   -count=3          Run each benchmark N times
 
 Examples:
-  scripts/run_bench.sh                       # run benchmark (default 5s)
-  scripts/run_bench.sh bench -benchtime=10s   # run benchmark (10s each)
+  scripts/run_bench.sh                       # benchmark + verify
+  scripts/run_bench.sh bench -benchtime=10s   # benchmark (10s each)
+  scripts/run_bench.sh verify                 # verify correctness only
   scripts/run_bench.sh clean                  # remove test data & reports
-  scripts/run_bench.sh help                   # show this help
 USAGE
+}
+
+# ── 确保测试数据存在（含 golden 文件）─────────────────────────────────────
+ensure_testdata() {
+    if [ ! -f internal/resp/testdata/sse_events.jsonl ] || [ ! -f internal/resp/testdata/correctness_golden.json ]; then
+        echo ">> Generating test data + golden file..."
+        python3 scripts/gen_testdata.py
+    fi
 }
 
 # ── 子命令: clean ─────────────────────────────────────────────────────────
 cmd_clean() {
     local removed=0
 
-    if [ -f internal/resp/testdata/sse_events.jsonl ]; then
-        rm -f internal/resp/testdata/sse_events.jsonl
-        echo ">> Removed: internal/resp/testdata/sse_events.jsonl"
-        removed=1
-    fi
+    for f in internal/resp/testdata/sse_events.jsonl internal/resp/testdata/correctness_golden.json; do
+        if [ -f "$f" ]; then
+            rm -f "$f"
+            echo ">> Removed: $f"
+            removed=1
+        fi
+    done
 
     if [ -d build ]; then
         rm -rf build
@@ -55,6 +66,38 @@ cmd_clean() {
     fi
 }
 
+# ── 正确性验证 ────────────────────────────────────────────────────────────
+cmd_verify() {
+    ensure_testdata
+
+    echo ">> Running correctness verification against golden file..."
+    local has_fail=0
+
+    for entry in "default|" "gjson|gjson" "sonic|sonicjson"; do
+        IFS='|' read -r label tag <<< "$entry"
+        local tag_flag=""
+        if [ -n "$tag" ]; then
+            tag_flag="-tags $tag"
+        fi
+        echo ""
+        echo "--- ${label} ---"
+        # shellcheck disable=SC2086
+        if go test -run="TestExtractCorrectness_${label}" -v ${tag_flag} ./internal/resp/ 2>&1; then
+            :
+        else
+            has_fail=1
+        fi
+    done
+
+    echo ""
+    if [ "$has_fail" -eq 0 ]; then
+        echo ">> ✅ All implementations match golden file."
+    else
+        echo ">> ❌ Some implementations failed! See errors above."
+        return 1
+    fi
+}
+
 # ── 子命令: bench ─────────────────────────────────────────────────────────
 cmd_bench() {
     local bench_args="${*:-"-benchtime=5s"}"
@@ -63,14 +106,9 @@ cmd_bench() {
     local report="build/bench_report_${timestamp}.md"
 
     mkdir -p build
+    ensure_testdata
 
-    # ── 1. 生成测试数据 ──────────────────────────────────────────────────
-    if [ ! -f internal/resp/testdata/sse_events.jsonl ]; then
-        echo ">> Generating test data..."
-        python3 scripts/gen_testdata.py
-    fi
-
-    # ── 2. 采集环境信息 ──────────────────────────────────────────────────
+    # ── 采集环境信息 ─────────────────────────────────────────────────────
     echo ">> Collecting system info..."
 
     local go_version go_env
@@ -96,7 +134,7 @@ cmd_bench() {
     data_lines="$(wc -l < internal/resp/testdata/sse_events.jsonl | tr -d ' ')"
     data_size="$(du -h internal/resp/testdata/sse_events.jsonl | cut -f1)"
 
-    # ── 3. 写入报告头部 ──────────────────────────────────────────────────
+    # ── 写入报告头部 ─────────────────────────────────────────────────────
     cat > "$report" <<EOF
 # JSON 解析方案 Benchmark 报告
 
@@ -139,7 +177,7 @@ ${bench_args}
 
 EOF
 
-    # ── 4. 运行 benchmark ────────────────────────────────────────────────
+    # ── 运行 benchmark ───────────────────────────────────────────────────
     run_single_bench() {
         local label="$1"
         local tag="$2"
@@ -164,13 +202,44 @@ EOF
     run_single_bench "gjson (path extract)" "gjson"
     run_single_bench "sonicjson (sonic JIT)" "sonicjson"
 
-    # ── 5. 汇总 ──────────────────────────────────────────────────────────
+    # ── 正确性验证 ───────────────────────────────────────────────────────
+    echo "" >> "$report"
+    echo "## 正确性验证 (vs golden file)" >> "$report"
+    echo "" >> "$report"
+
+    local has_fail=0
+    echo '| 实现 | 结果 |' >> "$report"
+    echo '|------|------|' >> "$report"
+
+    for entry in "default|" "gjson|gjson" "sonic|sonicjson"; do
+        IFS='|' read -r label tag <<< "$entry"
+        local tag_flag=""
+        if [ -n "$tag" ]; then
+            tag_flag="-tags $tag"
+        fi
+        echo "   Verifying: ${label} ..."
+        # shellcheck disable=SC2086
+        if go test -run="TestExtractCorrectness_${label}" -v ${tag_flag} ./internal/resp/ 2>&1 | tee /dev/stderr | grep -q "^--- PASS"; then
+            echo "| ${label} | ✅ PASS |" >> "$report"
+        else
+            echo "| ${label} | ❌ FAIL |" >> "$report"
+            has_fail=1
+        fi
+    done
+
+    # ── 汇总 ─────────────────────────────────────────────────────────────
+    echo "" >> "$report"
     echo "---" >> "$report"
     echo "" >> "$report"
     echo "_Report generated by \`scripts/run_bench.sh\`_" >> "$report"
 
     echo ""
     echo ">> Report saved to: ${report}"
+
+    if [ "$has_fail" -ne 0 ]; then
+        echo ">> ⚠️  Correctness verification failed!"
+        return 1
+    fi
 }
 
 # ── 主入口 ────────────────────────────────────────────────────────────────
@@ -179,6 +248,9 @@ case "${1:-bench}" in
         shift || true
         cmd_bench "$@"
         ;;
+    verify)
+        cmd_verify
+        ;;
     clean)
         cmd_clean
         ;;
@@ -186,7 +258,6 @@ case "${1:-bench}" in
         usage
         ;;
     -*)
-        # 兼容旧用法: scripts/run_bench.sh -benchtime=10s
         cmd_bench "$@"
         ;;
     *)

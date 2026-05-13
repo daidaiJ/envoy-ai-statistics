@@ -17,6 +17,7 @@ var (
 // 结构体通过 sync.Pool 复用，避免每次调用堆分配。
 func extract(data []byte) *UsageRaw {
 	openai := openaiPool.Get().(*OpenAIResp)
+	*openai = OpenAIResp{}
 	if err := sonic.Unmarshal(data, openai); err != nil {
 		openaiPool.Put(openai)
 		return nil
@@ -34,6 +35,7 @@ func extract(data []byte) *UsageRaw {
 	openaiPool.Put(openai)
 
 	anth := anthPool.Get().(*AnthropicResp)
+	*anth = AnthropicResp{}
 	if err := sonic.Unmarshal(data, anth); err != nil {
 		anthPool.Put(anth)
 		return nil

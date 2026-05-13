@@ -35,6 +35,24 @@ func BenchmarkParseUsage_sonic(b *testing.B) {
 	}
 }
 
+// BenchmarkExtractBatch_sonic 批量 extract：预提取所有 JSON，逐条解析。
+// 消除 ParseUsage 的 early-return + splitLines 开销，纯测 JSON 解析吞吐。
+func BenchmarkExtractBatch_sonic(b *testing.B) {
+	if len(sseEvents) == 0 {
+		b.Fatal("no test data; run: python3 scripts/gen_testdata.py")
+	}
+	jsons := preExtractJSONs(sseEvents)
+	totalBytes := totalJSONBytes(jsons)
+	b.SetBytes(totalBytes)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, j := range jsons {
+			extract(j)
+		}
+	}
+}
+
 // BenchmarkExtract_single_sonic 单条 JSON extract（小 / 大各一组）
 func BenchmarkExtract_single_sonic(b *testing.B) {
 	small := findEventBySize(sseEvents, 0, 1000)
@@ -64,4 +82,9 @@ func BenchmarkExtract_single_sonic(b *testing.B) {
 			extract(data)
 		}
 	})
+}
+
+// TestExtractCorrectness_sonic 用 golden 文件验证 sonic 解析正确性。
+func TestExtractCorrectness_sonic(t *testing.T) {
+	runCorrectnessTest(t, "sonic", sseEvents, extract)
 }

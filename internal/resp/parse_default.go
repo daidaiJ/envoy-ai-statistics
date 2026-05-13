@@ -8,7 +8,7 @@ import (
 	jsoniter "github.com/json-iterator/go"
 )
 
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
+var jsonAPI = jsoniter.ConfigCompatibleWithStandardLibrary
 
 var (
 	openaiPool = sync.Pool{New: func() any { return new(OpenAIResp) }}
@@ -19,7 +19,8 @@ var (
 // 结构体通过 sync.Pool 复用，避免每次调用堆分配。
 func extract(data []byte) *UsageRaw {
 	openai := openaiPool.Get().(*OpenAIResp)
-	if err := json.Unmarshal(data, openai); err != nil {
+	*openai = OpenAIResp{} // sync.Pool 复用时必须清零，json.Unmarshal 不会覆盖 JSON 中缺失的字段
+	if err := jsonAPI.Unmarshal(data, openai); err != nil {
 		openaiPool.Put(openai)
 		return nil
 	}
@@ -36,7 +37,8 @@ func extract(data []byte) *UsageRaw {
 	openaiPool.Put(openai)
 
 	anth := anthPool.Get().(*AnthropicResp)
-	if err := json.Unmarshal(data, anth); err != nil {
+	*anth = AnthropicResp{}
+	if err := jsonAPI.Unmarshal(data, anth); err != nil {
 		anthPool.Put(anth)
 		return nil
 	}

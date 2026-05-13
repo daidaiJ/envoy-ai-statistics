@@ -30,7 +30,8 @@ ext-proc/
 │   │   ├── parse_default.go # json-iterator 全量反序列化（默认）
 │   │   ├── parse_gjson.go   # gjson 路径提取（build tag: gjson）
 │   │   ├── parse_sonic.go   # sonic JIT 解析（build tag: sonicjson）
-│   │   └── responser.go     # Responser 接口（保留扩展）
+│   │   ├── responser.go     # Responser 接口（保留扩展）
+│   │   └── testdata/        # 测试数据 + golden 基准文件（gitignore）
 │   ├── aggregator/          # 时间窗口聚合器，推送 Redis Stream
 │   └── util/
 │       └── headers.go       # HeaderMap 提取工具函数
@@ -43,8 +44,8 @@ ext-proc/
 │   │   └── loglevel.go      # HTTP 日志等级 API
 │   └── redis/               # Redis 客户端封装
 └── scripts/
-    ├── gen_testdata.py      # 生成 bench 测试数据
-    ├── run_bench.sh         # 运行 benchmark 并生成报告
+    ├── gen_testdata.py      # 生成 bench 测试数据 + golden 正确性基准
+    ├── run_bench.sh         # 运行 benchmark + 正确性验证，生成报告
     └── install_tools.sh     # 安装 bench 依赖工具
 ```
 
@@ -68,7 +69,8 @@ go build -tags sonicjson ./cmd
 ### 性能对比
 
 > 测试环境：AMD Ryzen 5 4600H / Go 1.26.3 / Linux amd64 / CGO_ENABLED=0
-> 测试数据：1000 条 SSE 事件，48.5MB（small/medium/large/xlarge 混合分布）
+> 测试数据：1000 条 SSE 事件，49MB（small/medium/large/xlarge 混合分布）
+> 正确性：三种实现均通过 golden 文件逐条验证（1000/1000 匹配，累加汇总一致）
 > 以 **default (json-iterator)** 为基准线 (1.00x)，倍率 >1 表示更快
 
 #### 单条提取（单请求实时路径，`extract()`）
@@ -76,32 +78,28 @@ go build -tags sonicjson ./cmd
 | 指标 | small 事件 (~500B) | | | large 事件 (~50KB) | | |
 |------|:---:|:---:|:---:|:---:|:---:|:---:|
 | | **default** | **gjson** | **sonic** | **default** | **gjson** | **sonic** |
-| 耗时 ns/op | 3,255 | 2,378 | 1,364 | 490,215 | 84,861 | 44,973 |
-| **耗时倍率** | 1.00x | **1.37x** ↓ | **2.39x** ↓ | 1.00x | **5.77x** ↓ | **10.9x** ↓ |
-| 吞吐 MB/s | 217 | 297 | 518 | 191 | 1,104 | 2,083 |
-| **吞吐倍率** | 1.00x | **1.37x** | **2.39x** | 1.00x | **5.78x** | **10.9x** |
-| 吞吐 tokens/s ¹ | 22.7M | 31.1M | 54.3M | 25.2M | 145.8M | 275.2M |
-| **Token 倍率** | 1.00x | **1.37x** | **2.39x** | 1.00x | **5.78x** | **10.9x** |
-| 内存 B/op | 1,456 | 218 | 883 | 482,402 | 224 | 102,270 |
-| **内存倍率** | 1.00x | **0.15x** | **0.61x** | 1.00x | **0.0005x** | **0.21x** |
-| allocs/op | 11 | 6 | 3 | 27 | 6 | 3 |
+| 耗时 ns/op | 4,835 | 2,776 | 1,450 | 762,450 | 108,753 | 71,384 |
+| **耗时倍率** | 1.00x | **1.74x** ↓ | **3.33x** ↓ | 1.00x | **7.01x** ↓ | **10.7x** ↓ |
+| 吞吐 MB/s | 190 | 331 | 635 | 87 | 607 | 925 |
+| **吞吐倍率** | 1.00x | **1.74x** | **3.34x** | 1.00x | **7.01x** | **10.7x** |
+| 内存 B/op | 2,609 | 216 | 1,145 | 702,685 | 160 | 153,843 |
+| **内存倍率** | 1.00x | **0.08x** | **0.44x** | 1.00x | **0.0002x** | **0.22x** |
+| allocs/op | 12 | 6 | 3 | 48 | 5 | 5 |
 
-#### 批量解析（`ParseUsage()` 处理 1000 条）
+#### 批量提取（预提取全部 JSON，逐条 `extract()` × 1000）
 
 | 指标 | **default** | **gjson** | **sonic** |
 |------|:---:|:---:|:---:|
-| 耗时 ns/op | 35,677,275 | 53,852,042 | 38,236,084 |
-| **耗时倍率** | 1.00x | 1.51x ↓ | 1.07x ↓ |
-| 吞吐 MB/s | 1,426 | 945 | 1,331 |
-| **吞吐倍率** | 1.00x | 0.66x | 0.93x |
-| 吞吐 tokens/s ¹ | 353M | 234M | 330M |
-| **Token 倍率** | 1.00x | 0.66x | 0.93x |
-| 内存 B/op | 450,399 | 59,464 | 147,004 |
-| **内存倍率** | 1.00x | **0.13x** | **0.33x** |
-| allocs/op | 52 | 14 | 15 |
+| 耗时 ns/op | 465,601,244 | 68,050,493 | 54,359,101 |
+| **耗时倍率** | 1.00x | **6.84x** ↓ | **8.56x** ↓ |
+| 吞吐 MB/s | 109 | 743 | 930 |
+| **吞吐倍率** | 1.00x | **6.84x** | **8.56x** |
+| 内存 B/op | 435,844,790 | 185,292 | 80,522,192 |
+| **内存倍率** | 1.00x | **0.0004x** | **0.18x** |
+| allocs/op | 25,577 | 5,490 | 4,244 |
 
-> ¹ tokens/s 折算假设：JSON 固定结构开销 ~200B/event，实际内容按 4 bytes/token（中英混合）估算。
-> 测试数据 JSON 开销仅占 1%，大头是 content 字段，因此 MB/s 可直接折算。
+> 批量 benchmark 预提取全部 JSON 到 `[][]byte` 后逐条 `extract()`，消除 `ParseUsage` 的 early-return + 行分割开销，
+> 纯测 JSON 解析吞吐。旧版 benchmark 直接调用 `ParseUsage`，该函数在首条命中事件即返回，实际只解析了 1 条 JSON。
 
 ### 各后端特征
 
@@ -111,8 +109,8 @@ go build -tags sonicjson ./cmd
 | CGO 依赖 | 无 | 无 | 无（JIT 纯 Go，但需 mmap PROT_EXEC） |
 | 平台兼容 | 全平台 | 全平台 | amd64/arm64 Linux/macOS ² |
 | 二进制增量 | 基准 | +~200KB | +~2-3MB |
-| 核心优势 | 全量结构体，灵活扩展 | 内存极低，大 payload 优势巨大 | 小 payload 延迟最低 |
-| 核心劣势 | allocs 最多，大 payload 慢 | 批量场景吞吐不及另外两者 | 安全策略敏感，平台受限 |
+| 核心优势 | 全量结构体，灵活扩展 | 内存极低，大 payload 快 7x | 单条延迟最低 (3~10x) |
+| 核心劣势 | 最慢 (1x)，allocs 最多 | 多字段需多次扫描 | 安全策略敏感，平台受限 |
 
 > ² sonic 在不支持 JIT 的平台（arm32、mips、Windows）自动回退到 `encoding/json`，性能大幅下降。
 > 严格 seccomp / SELinux 策略可能阻止 mmap(PROT_EXEC)，导致 JIT 初始化失败。
@@ -121,10 +119,11 @@ go build -tags sonicjson ./cmd
 
 | 场景 | 推荐 | 原因 |
 |------|------|------|
-| **生产环境（通用）** | **default (json-iterator)** | 全平台兼容，批量解析吞吐最高，无安全顾虑 |
-| **高并发 + 小 payload 为主** | **sonic** | 单条延迟最低 (2.39x)，JIT 无 CGO 但需确认容器安全策略 |
-| **大 payload / 内存敏感** | **gjson** | 内存仅 default 的 0.05%~15%，大 payload 提取快 5.8x |
-| **交叉编译 / 嵌入式** | **default 或 gjson** | 纯 Go 无架构限制 |
+| **生产环境（通用）** | **sonic** | 单条延迟最低 (3~10x)，批量 8.56x，需确认容器 JIT 安全策略 |
+| **高并发 + 小 payload 为主** | **sonic** | 单条 3.33x，allocs 仅 3 次，GC 压力最小 |
+| **大 payload / 内存敏感** | **gjson** | 内存仅 default 的 0.02%，大 payload 单条快 7x，批量 6.84x |
+| **交叉编译 / 嵌入式** | **gjson** | 纯 Go 无架构限制，性能接近 sonic，内存极低 |
+| **json-iterator 兼容需求** | **default** | 全平台兼容，但性能差距明显，建议迁移 |
 
 ## 模块说明
 
@@ -434,15 +433,17 @@ data: [DONE]]
 ### 生成测试数据
 
 ```bash
-# 生成 1000 条 SSE 事件（~49MB），覆盖 small/medium/large/xlarge 四档
+# 生成 1000 条 SSE 事件（~49MB）+ golden 正确性基准文件
 python3 scripts/gen_testdata.py
-# 输出: internal/resp/testdata/sse_events.jsonl（已 gitignore）
+# 输出:
+#   internal/resp/testdata/sse_events.jsonl        — SSE 事件（benchmark 用）
+#   internal/resp/testdata/correctness_golden.json  — 每条事件期望解析结果 + 累加汇总
 ```
 
-### 运行 Benchmark
+### 运行 Benchmark + 正确性验证
 
 ```bash
-# 一键运行三种后端对比，生成 Markdown 报告
+# 一键运行三种后端对比 + 正确性验证，生成 Markdown 报告
 scripts/run_bench.sh
 
 # 指定 bench 时间（默认 5s）
@@ -450,9 +451,33 @@ scripts/run_bench.sh bench -benchtime=10s
 
 # 多次采样（用于统计分析）
 scripts/run_bench.sh bench -benchtime=5s -count=3
+
+# 仅运行正确性验证（不跑 benchmark）
+scripts/run_bench.sh verify
 ```
 
-报告输出到 `build/bench_report_<timestamp>.md`。
+报告输出到 `build/bench_report_<timestamp>.md`，包含 benchmark 结果和正确性验证表格。
+
+### 正确性验证机制
+
+`gen_testdata.py` 生成的 `correctness_golden.json` 包含每条事件的期望解析结果（model、input、output、cached）和累加汇总。
+三种实现的 `TestExtractCorrectness_*` 测试逐条对比 `extract()` 输出与 golden 文件，确保解析结果完全一致。
+
+```bash
+# 单独运行某个实现的正确性验证
+go test -run TestExtractCorrectness_default -v ./internal/resp/
+go test -run TestExtractCorrectness_gjson -v -tags gjson ./internal/resp/
+go test -run TestExtractCorrectness_sonic -v -tags sonicjson ./internal/resp/
+```
+
+### Benchmark 套件说明
+
+| Benchmark | 说明 |
+|-----------|------|
+| `BenchmarkExtractBatch_*` | **批量提取**：预提取全部 JSON 到 `[][]byte`，逐条 `extract()`，纯测 JSON 解析吞吐 |
+| `BenchmarkExtract_single_*/small` | 单条小事件 (~500B) 提取 |
+| `BenchmarkExtract_single_*/large` | 单条大事件 (~50KB) 提取 |
+| `BenchmarkParseUsage_*` | 端到端 `ParseUsage()`（含行分割 + early-return），反映真实调用路径 |
 
 ### 单独运行某个后端
 
