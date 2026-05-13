@@ -1,7 +1,13 @@
 *.tar
+*.exe
 **/.*
 
 # 但不要忽略 .gitignore 本身
 !.gitignore
 !.dockerignore
 config.yaml
+
+# 生成的测试数据 & bench 报告
+internal/resp/testdata/sse_events.jsonl
+build/bench_report_*.md
+build/escape_*.txt

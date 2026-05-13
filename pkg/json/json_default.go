@@ -1,3 +1,5 @@
+//go:build !sonicjson
+
 package json
 
 import jsoniter "github.com/json-iterator/go"

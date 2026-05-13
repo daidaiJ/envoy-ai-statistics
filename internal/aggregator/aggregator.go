@@ -26,6 +26,12 @@ type AggregateValue struct {
 	LastRecorded time.Time // 窗口内最后一条记录时间
 	InfSvcId     string
 	ModelId      string
+
+	// 延迟指标（聚合窗口内累计，flush 时计算均值/极值）
+	DurationSum time.Duration
+	DurationMax time.Duration
+	TTFTSum     time.Duration
+	TTFTMax     time.Duration
 }
 
 // record 记录请求
@@ -36,6 +42,8 @@ type record struct {
 	input    int64
 	output   int64
 	cached   int64
+	duration time.Duration
+	ttft     time.Duration
 }
 
 // Aggregator 时间窗口聚合器
@@ -144,6 +152,14 @@ func (a *Aggregator) processBatch(batch []record) {
 			val.CachedTokens += rec.cached
 			val.Count++
 			val.LastRecorded = now
+			val.DurationSum += rec.duration
+			if rec.duration > val.DurationMax {
+				val.DurationMax = rec.duration
+			}
+			val.TTFTSum += rec.ttft
+			if rec.ttft > val.TTFTMax {
+				val.TTFTMax = rec.ttft
+			}
 		} else {
 			a.aggregates[key] = &AggregateValue{
 				InputTokens:  rec.input,
@@ -154,6 +170,10 @@ func (a *Aggregator) processBatch(batch []record) {
 				LastRecorded: now,
 				InfSvcId:     rec.infSvcId,
 				ModelId:      rec.model,
+				DurationSum:  rec.duration,
+				DurationMax:  rec.duration,
+				TTFTSum:      rec.ttft,
+				TTFTMax:      rec.ttft,
 			}
 		}
 	}
@@ -176,7 +196,7 @@ func (a *Aggregator) Stop() {
 }
 
 // Record 记录一条 usage 数据（异步非阻塞）
-func (a *Aggregator) Record(infSvcId, sk, model string, input, output, cached int64) {
+func (a *Aggregator) Record(infSvcId, sk, model string, input, output, cached int64, duration, ttft time.Duration) {
 	rec := record{
 		infSvcId: infSvcId,
 		sk:       sk,
@@ -184,6 +204,8 @@ func (a *Aggregator) Record(infSvcId, sk, model string, input, output, cached in
 		input:    input,
 		output:   output,
 		cached:   cached,
+		duration: duration,
+		ttft:     ttft,
 	}
 
 	select {
@@ -228,6 +250,11 @@ func (a *Aggregator) flush() {
 			"window_end":    val.LastRecorded.Format(time.RFC3339Nano),
 			"sent_at":       sentAt.Format(time.RFC3339Nano),
 			"inf_svc_id":    key.InfSvcId,
+			// 延迟指标（毫秒）
+			"avg_duration_ms": val.DurationSum.Milliseconds() / val.Count,
+			"max_duration_ms": val.DurationMax.Milliseconds(),
+			"avg_ttft_ms":     val.TTFTSum.Milliseconds() / val.Count,
+			"max_ttft_ms":     val.TTFTMax.Milliseconds(),
 		}
 
 		if err := a.redisClient.XAdd(ctx, a.config.Aggr.StreamKey, fields, a.config.Aggr.StreamMaxLen); err != nil {
@@ -239,6 +266,14 @@ func (a *Aggregator) flush() {
 				existing.OutputTokens += val.OutputTokens
 				existing.CachedTokens += val.CachedTokens
 				existing.Count += val.Count
+				existing.DurationSum += val.DurationSum
+				if val.DurationMax > existing.DurationMax {
+					existing.DurationMax = val.DurationMax
+				}
+				existing.TTFTSum += val.TTFTSum
+				if val.TTFTMax > existing.TTFTMax {
+					existing.TTFTMax = val.TTFTMax
+				}
 			} else {
 				a.aggregates[key] = val
 			}

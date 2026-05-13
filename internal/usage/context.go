@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // requestCtxKey 用于在 context 中存储 RequestCtx 的 key
@@ -32,6 +33,10 @@ type RequestCtx struct {
 	recentChunks []byte
 	chunkIndex   int
 	Count        int
+
+	// 延迟指标
+	StartTime      time.Time // 请求头到达时间
+	FirstChunkTime time.Time // 首个响应 body chunk 到达时间（TTFT）
 }
 
 // NewRequestCtx 从对象池获取请求上下文（已重置）
@@ -52,6 +57,8 @@ func (ctx *RequestCtx) Release() {
 	ctx.ShouldStat = false
 	ctx.chunkIndex = 0
 	ctx.recentChunks = nil
+	ctx.StartTime = time.Time{}
+	ctx.FirstChunkTime = time.Time{}
 
 	requestCtxPool.Put(ctx)
 }

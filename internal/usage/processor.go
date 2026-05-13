@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"time"
 	"tokenusage/internal/util"
 	"tokenusage/pkg/logger"
 
@@ -92,6 +93,8 @@ func (r *RouterProcessor) ProcessRequestHeaders(ctx context.Context, headers *co
 		logger.Debug("跳过非LLM统计路径", "path", reqCtx.Path)
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}, nil
 	}
+
+	reqCtx.StartTime = time.Now()
 
 	auth := strings.Split(reqHeaders["authorization"], " ")
 	if len(auth) > 1 {
@@ -272,6 +275,9 @@ func (r *RouterProcessor) ProcessResponseBody(ctx context.Context, body *extproc
 	}
 
 	if len(body.Body) > 0 {
+		if reqCtx.Count == 0 {
+			reqCtx.FirstChunkTime = time.Now()
+		}
 		reqCtx.recordBodyChunk(body.Body)
 	}
 
