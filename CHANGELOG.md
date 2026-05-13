@@ -10,6 +10,60 @@
 
 ---
 
+## [1.3.0] - 2026-05-13
+
+### Added
+
+- **多后端 JSON 解析（build tag 切换）**
+  - `internal/resp/parse_default.go`：json-iterator 全量反序列化 + sync.Pool（默认，无 build tag）
+  - `internal/resp/parse_gjson.go`：gjson 按路径提取标量字段（`-tags gjson`），零结构体分配
+  - `internal/resp/parse_sonic.go`：sonic JIT 加速反序列化（`-tags sonicjson`）
+  - `pkg/json/json_sonic.go`：`pkg/json` 包的 sonic 实现（`-tags sonicjson`）
+  - 三种方案通过 `//go:build` 条件编译互斥，运行时零开销
+  - 新增依赖：`github.com/tidwall/gjson v1.19.0`、`github.com/bytedance/sonic v1.15.1`
+
+- **延迟指标采集与推送**
+  - `RequestCtx` 新增 `StartTime`（请求头到达时间）和 `FirstChunkTime`（首个响应 body chunk 到达时间）
+  - `ProcessRequestHeaders` 记录 `StartTime`
+  - `ProcessResponseBody` 在首个 chunk 到达时记录 `FirstChunkTime`（TTFT）
+  - `Aggregator.Record()` 新增 `duration` 和 `ttft` 参数
+  - `AggregateValue` 新增 `DurationSum/DurationMax/TTFTSum/TTFTMax` 累计字段
+  - Redis Stream flush 时新增 `avg_duration_ms`、`max_duration_ms`、`avg_ttft_ms`、`max_ttft_ms` 四个字段
+
+- **Benchmark 基础设施**
+  - `internal/resp/bench_default_test.go`：json-iterator 方案 benchmark
+  - `internal/resp/bench_gjson_test.go`：gjson 方案 benchmark（`-tags gjson`）
+  - `internal/resp/bench_sonic_test.go`：sonic 方案 benchmark（`-tags sonicjson`）
+  - `internal/resp/bench_helper_test.go`：benchmark 共享辅助函数（`findEventBySize`、`stripSSEPrefix`）
+  - `scripts/gen_testdata.py`：生成 1000 条 SSE 测试数据（small/medium/large/xlarge 四档，OpenAI + Anthropic 格式各 50%）
+  - `scripts/run_bench.sh`：一键运行三种后端对比 benchmark，生成 Markdown 报告
+  - `scripts/install_tools.sh`：安装 bench 依赖工具
+
+### Changed
+
+- **Usage 解析重构（`internal/resp/`）**
+  - 新增 `internal/resp/usage_raw.go`：`UsageRaw` 轻量结构体 + `ParseUsage()` 统一入口
+  - `ParseUsage()` 替代原 `sse.go` 中的 `parseUsageFromSSE()`，职责从 usage 包移至 resp 包
+  - `extract()` 函数由三种后端各自实现（build tag 互斥），返回 `*UsageRaw`
+  - `internal/resp/responser.go`：移除对象池和 `GetResponser/PutResponser`，仅保留 `Responser` 接口定义
+
+- **SSE 解析简化（`internal/usage/sse.go`）**
+  - `recordBodyChunk` 不再 `bytes.Clone`，直接引用 gRPC protobuf 消息的 `[]byte`（同一调用栈内有效）
+  - `recentChunks` 从 `[2][]byte` 滚动改为单个 `[]byte`
+  - 移除 `parseUsageFromSSE()`，改为调用 `resp.ParseUsage()`
+  - 移除 `fmt.Printf` 调试输出，仅保留 `logger.Debug` 结构化日志
+
+- **SSE 解析辅助函数纯 Go 化（`internal/resp/usage_raw.go`）**
+  - `splitLines()`：手写分割，避免 `bytes.Split` 额外分配
+  - `trimSpace()`：手写裁剪，避免 `bytes.TrimSpace` 分配
+  - `trimDataPrefix()`：手写 SSE `data: ` 前缀裁剪
+
+### Removed
+
+- **移除部署相关文件**（Dockerfile、manifests/、scripts/debug.sh）
+- **移除 zerolog 及其间接依赖**（`github.com/rs/zerolog`、`github.com/mattn/go-colorable`、`github.com/mattn/go-isatty`）
+- **移除 stretchr/testify 间接依赖**
+
 ## [1.2.0] - 2026-05-06
 
 ### Added

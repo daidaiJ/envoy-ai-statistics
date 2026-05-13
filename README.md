@@ -8,6 +8,8 @@
 - **流式支持**：自动识别流式（SSE）和非流式响应
 - **Usage 解析**：从 SSE 数据中提取 token 使用量
 - **流式请求体注入**：自动为流式请求注入 `stream_options={"include_usage": true}`，强制后端返回 usage（无需客户端修改）
+- **延迟指标**：自动采集请求总耗时 (duration) 和首 token 延迟 (TTFT)，聚合后推送至 Redis Stream
+- **多后端 JSON 解析**：支持三种 JSON 解析策略（build tag 切换），兼顾性能与兼容性
 - **故障透传**：ext_proc 服务异常时流量正常转发，不影响业务
 - **并发安全**：每个请求独立的 gRPC stream，天然隔离
 - **动态日志**：运行时可通过 HTTP API 动态调整日志等级
@@ -20,25 +22,109 @@ ext-proc/
 ├── config/config.go         # 配置加载 + 安全打印
 ├── internal/
 │   ├── usage/
-│   │   ├── context.go       # RequestCtx 请求上下文定义
+│   │   ├── context.go       # RequestCtx 请求上下文定义（含延迟指标）
 │   │   ├── processor.go     # Processor 接口 + RouterProcessor 实现
-│   │   └── sse.go           # SSE 解析 + body 记录
+│   │   └── sse.go           # SSE 响应解析 + usage 提取
+│   ├── resp/
+│   │   ├── usage_raw.go     # UsageRaw 定义 + ParseUsage 入口
+│   │   ├── parse_default.go # json-iterator 全量反序列化（默认）
+│   │   ├── parse_gjson.go   # gjson 路径提取（build tag: gjson）
+│   │   ├── parse_sonic.go   # sonic JIT 解析（build tag: sonicjson）
+│   │   └── responser.go     # Responser 接口（保留扩展）
 │   ├── aggregator/          # 时间窗口聚合器，推送 Redis Stream
 │   └── util/
 │       └── headers.go       # HeaderMap 提取工具函数
 ├── pkg/
+│   ├── json/                # JSON 库 build tag 切换封装
 │   ├── logger/              # 动态日志等级控制（slog 标准库）
 │   ├── server/
 │   │   ├── server.go        # ExtProcServer + gRPC stream 处理
 │   │   ├── health.go        # gRPC 健康检查
 │   │   └── loglevel.go      # HTTP 日志等级 API
 │   └── redis/               # Redis 客户端封装
-├── scripts/debug.sh         # 容器内日志等级控制脚本
-├── manifests/
-│   ├── deployment.yaml      # Kubernetes Deployment + Service
-│   └── envoyfilter.yaml     # Istio EnvoyFilter CR
-└── Dockerfile               # 构建镜像
+└── scripts/
+    ├── gen_testdata.py      # 生成 bench 测试数据
+    ├── run_bench.sh         # 运行 benchmark 并生成报告
+    └── install_tools.sh     # 安装 bench 依赖工具
 ```
+
+## JSON 解析后端
+
+项目支持三种 JSON 解析策略，通过 Go build tag 在编译时切换，运行时零开销。
+
+### 切换方式
+
+```bash
+# 默认：json-iterator（全量反序列化）
+go build ./cmd
+
+# gjson（路径提取）
+go build -tags gjson ./cmd
+
+# sonic（JIT 加速）
+go build -tags sonicjson ./cmd
+```
+
+### 性能对比
+
+> 测试环境：AMD Ryzen 5 4600H / Go 1.26.3 / Linux amd64 / CGO_ENABLED=0
+> 测试数据：1000 条 SSE 事件，48.5MB（small/medium/large/xlarge 混合分布）
+> 以 **default (json-iterator)** 为基准线 (1.00x)，倍率 >1 表示更快
+
+#### 单条提取（单请求实时路径，`extract()`）
+
+| 指标 | small 事件 (~500B) | | | large 事件 (~50KB) | | |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| | **default** | **gjson** | **sonic** | **default** | **gjson** | **sonic** |
+| 耗时 ns/op | 3,255 | 2,378 | 1,364 | 490,215 | 84,861 | 44,973 |
+| **耗时倍率** | 1.00x | **1.37x** ↓ | **2.39x** ↓ | 1.00x | **5.77x** ↓ | **10.9x** ↓ |
+| 吞吐 MB/s | 217 | 297 | 518 | 191 | 1,104 | 2,083 |
+| **吞吐倍率** | 1.00x | **1.37x** | **2.39x** | 1.00x | **5.78x** | **10.9x** |
+| 吞吐 tokens/s ¹ | 22.7M | 31.1M | 54.3M | 25.2M | 145.8M | 275.2M |
+| **Token 倍率** | 1.00x | **1.37x** | **2.39x** | 1.00x | **5.78x** | **10.9x** |
+| 内存 B/op | 1,456 | 218 | 883 | 482,402 | 224 | 102,270 |
+| **内存倍率** | 1.00x | **0.15x** | **0.61x** | 1.00x | **0.0005x** | **0.21x** |
+| allocs/op | 11 | 6 | 3 | 27 | 6 | 3 |
+
+#### 批量解析（`ParseUsage()` 处理 1000 条）
+
+| 指标 | **default** | **gjson** | **sonic** |
+|------|:---:|:---:|:---:|
+| 耗时 ns/op | 35,677,275 | 53,852,042 | 38,236,084 |
+| **耗时倍率** | 1.00x | 1.51x ↓ | 1.07x ↓ |
+| 吞吐 MB/s | 1,426 | 945 | 1,331 |
+| **吞吐倍率** | 1.00x | 0.66x | 0.93x |
+| 吞吐 tokens/s ¹ | 353M | 234M | 330M |
+| **Token 倍率** | 1.00x | 0.66x | 0.93x |
+| 内存 B/op | 450,399 | 59,464 | 147,004 |
+| **内存倍率** | 1.00x | **0.13x** | **0.33x** |
+| allocs/op | 52 | 14 | 15 |
+
+> ¹ tokens/s 折算假设：JSON 固定结构开销 ~200B/event，实际内容按 4 bytes/token（中英混合）估算。
+> 测试数据 JSON 开销仅占 1%，大头是 content 字段，因此 MB/s 可直接折算。
+
+### 各后端特征
+
+| | default (json-iterator) | gjson | sonic |
+|---|---|---|---|
+| 实现方式 | 全量反序列化 + sync.Pool | 按路径提取标量字段 | JIT 编译 + 全量反序列化 |
+| CGO 依赖 | 无 | 无 | 无（JIT 纯 Go，但需 mmap PROT_EXEC） |
+| 平台兼容 | 全平台 | 全平台 | amd64/arm64 Linux/macOS ² |
+| 二进制增量 | 基准 | +~200KB | +~2-3MB |
+| 核心优势 | 全量结构体，灵活扩展 | 内存极低，大 payload 优势巨大 | 小 payload 延迟最低 |
+| 核心劣势 | allocs 最多，大 payload 慢 | 批量场景吞吐不及另外两者 | 安全策略敏感，平台受限 |
+
+> ² sonic 在不支持 JIT 的平台（arm32、mips、Windows）自动回退到 `encoding/json`，性能大幅下降。
+> 严格 seccomp / SELinux 策略可能阻止 mmap(PROT_EXEC)，导致 JIT 初始化失败。
+
+### 场景推荐
+
+| 场景 | 推荐 | 原因 |
+|------|------|------|
+| **生产环境（通用）** | **default (json-iterator)** | 全平台兼容，批量解析吞吐最高，无安全顾虑 |
+| **高并发 + 小 payload 为主** | **sonic** | 单条延迟最低 (2.39x)，JIT 无 CGO 但需确认容器安全策略 |
+| **大 payload / 内存敏感** | **gjson** | 内存仅 default 的 0.05%~15%，大 payload 提取快 5.8x |
+| **交叉编译 / 嵌入式** | **default 或 gjson** | 纯 Go 无架构限制 |
 
 ## 模块说明
 
@@ -199,6 +285,10 @@ aggregator:
 | `window_end` | 窗口内最后一条记录时间（RFC3339Nano） |
 | `sent_at` | 推送时间（RFC3339Nano） |
 | `inf_svc_id` | 推理服务 ID（从 maas-inference-service header 提取） |
+| `avg_duration_ms` | 窗口内请求平均总耗时（ms） |
+| `max_duration_ms` | 窗口内请求最大总耗时（ms） |
+| `avg_ttft_ms` | 窗口内请求平均首 token 延迟（ms） |
+| `max_ttft_ms` | 窗口内请求最大首 token 延迟（ms） |
 
 ### 示例输出
 
@@ -216,7 +306,12 @@ XAdd success sk=sk-abc123 model=gpt-4 input_tokens=150 output_tokens=80 cached_t
   "count": 5,
   "window_start": "2024-01-15T10:00:00.123456789Z",
   "window_end": "2024-01-15T10:00:25.987654321Z",
-  "sent_at": "2024-01-15T10:00:30.000000000Z"
+  "sent_at": "2024-01-15T10:00:30.000000000Z",
+  "inf_svc_id": "svc-inference-01",
+  "avg_duration_ms": 1250,
+  "max_duration_ms": 3200,
+  "avg_ttft_ms": 180,
+  "max_ttft_ms": 450
 }
 ```
 
@@ -332,4 +427,48 @@ data: [DONE]]
   "total_tokens": 15
 }
 ================================
+```
+
+## Benchmark 指南
+
+### 生成测试数据
+
+```bash
+# 生成 1000 条 SSE 事件（~49MB），覆盖 small/medium/large/xlarge 四档
+python3 scripts/gen_testdata.py
+# 输出: internal/resp/testdata/sse_events.jsonl（已 gitignore）
+```
+
+### 运行 Benchmark
+
+```bash
+# 一键运行三种后端对比，生成 Markdown 报告
+scripts/run_bench.sh
+
+# 指定 bench 时间（默认 5s）
+scripts/run_bench.sh bench -benchtime=10s
+
+# 多次采样（用于统计分析）
+scripts/run_bench.sh bench -benchtime=5s -count=3
+```
+
+报告输出到 `build/bench_report_<timestamp>.md`。
+
+### 单独运行某个后端
+
+```bash
+# default (json-iterator)
+go test -bench=. -benchmem -run=^$ ./internal/resp/
+
+# gjson
+go test -bench=. -benchmem -run=^$ -tags gjson ./internal/resp/
+
+# sonic
+go test -bench=. -benchmem -run=^$ -tags sonicjson ./internal/resp/
+```
+
+### 清理
+
+```bash
+scripts/run_bench.sh clean
 ```
