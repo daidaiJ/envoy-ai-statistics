@@ -1,6 +1,7 @@
 package resp
 
 import (
+	"bytes"
 	"time"
 
 	"tokenusage/pkg/logger"
@@ -39,7 +40,7 @@ func ParseUsage(body []byte, path string) *UsageRaw {
 
 		result := extract(jsonPart)
 		if result == nil {
-			logger.Warn("解析响应JSON失败", "path", path, "raw", string(jsonPart))
+			logger.Warn("解析响应JSON失败", "path", path, "len", len(jsonPart))
 			continue
 		}
 
@@ -48,6 +49,30 @@ func ParseUsage(body []byte, path string) *UsageRaw {
 		}
 	}
 	return nil
+}
+
+// ExtractModel 从 JSON 字节中快速提取 model 字段值。
+// 使用字节级扫描，不依赖 JSON 解析器，适合高频调用。
+// 返回空字符串表示未找到或格式异常。
+func ExtractModel(data []byte) string {
+	idx := bytes.Index(data, []byte(`"model"`))
+	if idx < 0 {
+		return ""
+	}
+	rest := data[idx+7:]
+	// 跳过空白和冒号
+	for len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == ':') {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 || rest[0] != '"' {
+		return ""
+	}
+	rest = rest[1:] // 跳过开头引号
+	end := bytes.IndexByte(rest, '"')
+	if end < 0 {
+		return ""
+	}
+	return string(rest[:end])
 }
 
 // splitLines 按换行符分割，避免 bytes.Split 的额外分配

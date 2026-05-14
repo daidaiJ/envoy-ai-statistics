@@ -9,9 +9,6 @@ import (
 // requestCtxKey 用于在 context 中存储 RequestCtx 的 key
 type requestCtxKey struct{}
 
-// bodyBuf 保留阈值：超过此大小的 buffer 在放回池时丢弃，避免内存膨胀
-const bodyBufMaxRetainSize = 1 << 20 // 1MB
-
 // requestCtxPool 复用 RequestCtx 对象，减少 GC 压力
 var requestCtxPool = sync.Pool{
 	New: func() any {
@@ -45,9 +42,7 @@ func NewRequestCtx() *RequestCtx {
 }
 
 // Release 放回对象池，必须在 stream 结束时调用
-// 同步重置字段，开销极小（几个字段赋值），无需异步
 func (ctx *RequestCtx) Release() {
-	// 重置字符串字段
 	ctx.Model = ""
 	ctx.Path = ""
 	ctx.PathOnly = ""
@@ -55,6 +50,7 @@ func (ctx *RequestCtx) Release() {
 	ctx.InferenceId = ""
 	ctx.IsStreaming = false
 	ctx.ShouldStat = false
+	ctx.Count = 0
 	ctx.chunkIndex = 0
 	ctx.recentChunks = nil
 	ctx.StartTime = time.Time{}

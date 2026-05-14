@@ -11,6 +11,7 @@ import (
 	"tokenusage/config"
 	"tokenusage/internal/aggregator"
 	"tokenusage/internal/usage"
+	"tokenusage/pkg/exporters"
 	"tokenusage/pkg/logger"
 	"tokenusage/pkg/server"
 )
@@ -34,28 +35,35 @@ func main() {
 	// 打印配置信息（安全，密码已隐藏）
 	logger.Info(cfg.String())
 
+	// 创建 exporter
+	exp, err := exporters.New(cfg)
+	if err != nil {
+		logger.Error("create exporter failed", "error", err)
+		os.Exit(1)
+	}
+
 	// 初始化聚合器
-	agg, err := aggregator.New(cfg)
+	agg, err := aggregator.New(cfg, exp)
 	if err != nil {
 		logger.Error("create aggregator failed", "error", err)
 		os.Exit(1)
 	}
 	usage.SetAggregator(agg)
 	agg.Start()
-	defer agg.Stop() // 确保退出时 flush 剩余数据
+	defer agg.Stop()
 
 	// 启动 HTTP 服务（用于动态配置日志等级）
 	go func() {
 		http.Handle("/log/level", server.NewLogLevelHandler())
 		logger.Info("HTTP server started for log level control", "addr", *httpAddr)
-		if err := http.ListenAndServe(*httpAddr, nil); err != nil {
+		if err := http.ListenAndServe(*httpAddr, nil); err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP server error", "error", err)
 		}
 	}()
 
 	// 启动 gRPC 服务器
 	go func() {
-		if err := server.StartServer(*addr); err != nil {
+		if err := server.StartServer(*addr, cfg); err != nil {
 			logger.Error("server error", "error", err)
 			os.Exit(1)
 		}

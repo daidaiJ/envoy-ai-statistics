@@ -2,9 +2,9 @@ package server
 
 import (
 	"fmt"
-	"math"
 	"net"
 
+	"tokenusage/config"
 	"tokenusage/internal/usage"
 	"tokenusage/pkg/logger"
 
@@ -16,13 +16,13 @@ import (
 // ExtProcServer 实现 gRPC stream 处理
 type ExtProcServer struct {
 	extprocv3.UnimplementedExternalProcessorServer
-	processor *usage.RouterProcessor
+	processor usage.Processor
 }
 
 // NewExtProcServer 创建新的 ext_proc 服务器
-func NewExtProcServer() *ExtProcServer {
+func NewExtProcServer(cfg *config.Config) *ExtProcServer {
 	return &ExtProcServer{
-		processor: &usage.RouterProcessor{},
+		processor: usage.NewRouterProcessor(cfg),
 	}
 }
 
@@ -31,7 +31,14 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 	logger.Debug("新gRPC stream连接建立")
 	reqCtx := usage.NewRequestCtx()
 	ctx := usage.ContextWithRequestCtx(stream.Context(), reqCtx)
-	defer reqCtx.Release() // 确保对象放回池中
+	defer reqCtx.Release()
+
+	// 透传响应模板，用于错误回退和未知消息类型
+	passthrough := func() *extprocv3.ProcessingResponse {
+		return &extprocv3.ProcessingResponse{
+			Response: &extprocv3.ProcessingResponse_RequestHeaders{},
+		}
+	}
 
 	for {
 		req, err := stream.Recv()
@@ -45,17 +52,26 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 		switch r := req.Request.(type) {
 		case *extprocv3.ProcessingRequest_RequestHeaders:
 			logger.Debug("收到RequestHeaders")
-			resp, _ = s.processor.ProcessRequestHeaders(ctx, r.RequestHeaders.Headers)
+			resp, err = s.processor.ProcessRequestHeaders(ctx, r.RequestHeaders.Headers)
 		case *extprocv3.ProcessingRequest_RequestBody:
 			logger.Debug("收到RequestBody")
-			resp, _ = s.processor.ProcessRequestBody(ctx, r.RequestBody)
+			resp, err = s.processor.ProcessRequestBody(ctx, r.RequestBody)
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
 			logger.Debug("收到ResponseHeaders")
-			resp, _ = s.processor.ProcessResponseHeaders(ctx, r.ResponseHeaders.Headers)
+			resp, err = s.processor.ProcessResponseHeaders(ctx, r.ResponseHeaders.Headers)
 		case *extprocv3.ProcessingRequest_ResponseBody:
-			resp, _ = s.processor.ProcessResponseBody(ctx, r.ResponseBody)
+			resp, err = s.processor.ProcessResponseBody(ctx, r.ResponseBody)
 		default:
 			logger.Warn("收到未知请求类型", "type", fmt.Sprintf("%T", req.Request))
+			resp = passthrough()
+		}
+
+		if err != nil {
+			logger.Error("processor error, falling back to passthrough", "error", err)
+			resp = passthrough()
+		}
+		if resp == nil {
+			resp = passthrough()
 		}
 
 		if err := stream.Send(resp); err != nil {
@@ -66,7 +82,7 @@ func (s *ExtProcServer) Process(stream extprocv3.ExternalProcessor_ProcessServer
 }
 
 // StartServer 启动 gRPC 服务器
-func StartServer(addr string) error {
+func StartServer(addr string, cfg *config.Config) error {
 	if addr == "" {
 		addr = "0.0.0.0:8888"
 	}
@@ -76,10 +92,10 @@ func StartServer(addr string) error {
 		return fmt.Errorf("listen failed: %w", err)
 	}
 
-	srv := grpc.NewServer(grpc.MaxRecvMsgSize(math.MaxInt))
-	extprocv3.RegisterExternalProcessorServer(srv, NewExtProcServer())
+	srv := grpc.NewServer(grpc.MaxRecvMsgSize(cfg.GRPCMaxRecvSize))
+	extprocv3.RegisterExternalProcessorServer(srv, NewExtProcServer(cfg))
 	grpc_health_v1.RegisterHealthServer(srv, NewHealthServer())
 
-	logger.Info("ext_proc server started", "addr", addr)
+	logger.Info("ext_proc server started", "addr", addr, "max_recv_size", cfg.GRPCMaxRecvSize)
 	return srv.Serve(listen)
 }

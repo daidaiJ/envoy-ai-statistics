@@ -1,18 +1,19 @@
 package aggregator
 
 import (
-	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tokenusage/config"
+	"tokenusage/pkg/exporters"
 	"tokenusage/pkg/logger"
-	redisclient "tokenusage/pkg/redis"
 )
 
 // AggregateKey 聚合键：按 sk + model 分组
 type AggregateKey struct {
 	SK       string
+	Model    string
 	InfSvcId string
 }
 
@@ -22,8 +23,8 @@ type AggregateValue struct {
 	OutputTokens int64
 	CachedTokens int64
 	Count        int64
-	WindowStart  time.Time // 窗口内第一条记录时间
-	LastRecorded time.Time // 窗口内最后一条记录时间
+	WindowStart  time.Time
+	LastRecorded time.Time
 	InfSvcId     string
 	ModelId      string
 
@@ -34,77 +35,87 @@ type AggregateValue struct {
 	TTFTMax     time.Duration
 }
 
-// record 记录请求
-type record struct {
-	infSvcId string
-	sk       string
-	model    string
-	input    int64
-	output   int64
-	cached   int64
-	duration time.Duration
-	ttft     time.Duration
-}
-
 // Aggregator 时间窗口聚合器
 type Aggregator struct {
-	config      *config.Config
-	redisClient *redisclient.Client
+	config   *config.Config
+	exporter exporters.Exporter
 
 	mu         sync.Mutex
 	aggregates map[AggregateKey]*AggregateValue
 
-	ticker    *time.Ticker
-	recordCh  chan record
-	stopCh    chan struct{}
-	wg        sync.WaitGroup
+	ticker         *time.Ticker
+	recordCh       chan exporters.Record
+	stopCh         chan struct{}
+	stopOnce       sync.Once
+	wg             sync.WaitGroup
+	droppedRecords atomic.Int64
 }
 
 // New 创建聚合器
-func New(cfg *config.Config) (*Aggregator, error) {
-	redisClient, err := redisclient.NewClient(cfg)
-	if err != nil {
-		return nil, err
+func New(cfg *config.Config, exp exporters.Exporter) (*Aggregator, error) {
+	chSize := cfg.Aggr.ChannelSize
+	if chSize == 0 {
+		chSize = 10000
 	}
 
 	return &Aggregator{
-		config:      cfg,
-		redisClient: redisClient,
-		aggregates:  make(map[AggregateKey]*AggregateValue),
-		recordCh:    make(chan record, 10000), // 带 buffer 的 channel，避免高并发时阻塞
-		stopCh:      make(chan struct{}),
+		config:     cfg,
+		exporter:   exp,
+		aggregates: make(map[AggregateKey]*AggregateValue),
+		recordCh:   make(chan exporters.Record, chSize),
+		stopCh:     make(chan struct{}),
 	}, nil
 }
 
 // Start 启动定时刷新和 record 消费
 func (a *Aggregator) Start() {
-	a.ticker = time.NewTicker(a.config.Aggr.WindowDuration)
+	if a.config.Aggr.Enabled {
+		a.ticker = time.NewTicker(a.config.Aggr.WindowDuration)
+	}
 
 	// 启动 record 消费 goroutine
 	a.wg.Add(1)
 	go a.consumeRecords()
 
-	// 启动定时刷新 goroutine
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
-		for {
-			select {
-			case <-a.ticker.C:
-				a.flush()
-			case <-a.stopCh:
-				return
+	// 启动定时刷新 goroutine（仅聚合模式）
+	if a.ticker != nil {
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			for {
+				select {
+				case <-a.ticker.C:
+					a.flush("timer")
+				case <-a.stopCh:
+					return
+				}
 			}
-		}
-	}()
+		}()
+	}
 }
 
-// consumeRecords 消费 record channel，批量处理以提高吞吐
+// consumeRecords 消费 record channel
 func (a *Aggregator) consumeRecords() {
 	defer a.wg.Done()
 
-	// 批量处理，减少锁操作次数
-	batch := make([]record, 0, 100)
+	if !a.config.Aggr.Enabled {
+		// 非聚合模式：直接转发到 exporter
+		for {
+			select {
+			case rec := <-a.recordCh:
+				a.exporter.Record(rec)
+			case <-a.stopCh:
+				// 停止前消费完剩余记录
+				for len(a.recordCh) > 0 {
+					a.exporter.Record(<-a.recordCh)
+				}
+				return
+			}
+		}
+	}
+
+	// 聚合模式：批量处理
+	batch := make([]exporters.Record, 0, 100)
 
 	for {
 		select {
@@ -116,7 +127,6 @@ func (a *Aggregator) consumeRecords() {
 				case r := <-a.recordCh:
 					batch = append(batch, r)
 				default:
-					// channel 空了，处理当前批次
 					goto process
 				}
 			}
@@ -139,93 +149,112 @@ func (a *Aggregator) consumeRecords() {
 }
 
 // processBatch 批量处理记录（一次加锁）
-func (a *Aggregator) processBatch(batch []record) {
+func (a *Aggregator) processBatch(batch []exporters.Record) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	now := time.Now()
 	for _, rec := range batch {
-		key := AggregateKey{SK: rec.sk, InfSvcId: rec.infSvcId}
+		key := AggregateKey{SK: rec.SK, Model: rec.Model, InfSvcId: rec.InfSvcId}
 		if val, exists := a.aggregates[key]; exists {
-			val.InputTokens += rec.input
-			val.OutputTokens += rec.output
-			val.CachedTokens += rec.cached
+			val.InputTokens += rec.InputTokens
+			val.OutputTokens += rec.OutputTokens
+			val.CachedTokens += rec.CachedTokens
 			val.Count++
 			val.LastRecorded = now
-			val.DurationSum += rec.duration
-			if rec.duration > val.DurationMax {
-				val.DurationMax = rec.duration
+			val.DurationSum += rec.Duration
+			if rec.Duration > val.DurationMax {
+				val.DurationMax = rec.Duration
 			}
-			val.TTFTSum += rec.ttft
-			if rec.ttft > val.TTFTMax {
-				val.TTFTMax = rec.ttft
+			val.TTFTSum += rec.TTFT
+			if rec.TTFT > val.TTFTMax {
+				val.TTFTMax = rec.TTFT
 			}
 		} else {
 			a.aggregates[key] = &AggregateValue{
-				InputTokens:  rec.input,
-				OutputTokens: rec.output,
-				CachedTokens: rec.cached,
+				InputTokens:  rec.InputTokens,
+				OutputTokens: rec.OutputTokens,
+				CachedTokens: rec.CachedTokens,
 				Count:        1,
 				WindowStart:  now,
 				LastRecorded: now,
-				InfSvcId:     rec.infSvcId,
-				ModelId:      rec.model,
-				DurationSum:  rec.duration,
-				DurationMax:  rec.duration,
-				TTFTSum:      rec.ttft,
-				TTFTMax:      rec.ttft,
+				InfSvcId:     rec.InfSvcId,
+				ModelId:      rec.Model,
+				DurationSum:  rec.Duration,
+				DurationMax:  rec.Duration,
+				TTFTSum:      rec.TTFT,
+				TTFTMax:      rec.TTFT,
 			}
 		}
 	}
 }
 
-// Stop 优雅停止，刷新剩余数据
+// Stop 优雅停止，幂等（可多次调用）
 func (a *Aggregator) Stop() {
-	close(a.stopCh)
-	if a.ticker != nil {
-		a.ticker.Stop()
-	}
-	a.wg.Wait()
+	a.stopOnce.Do(func() {
+		close(a.stopCh)
+		if a.ticker != nil {
+			a.ticker.Stop()
+		}
+		a.wg.Wait()
 
-	// 最后一次刷新
-	a.flush()
+		// 最后一次刷新
+		a.flush("shutdown")
 
-	if a.redisClient != nil {
-		a.redisClient.Close()
-	}
+		// 打印丢弃统计
+		dropped := a.droppedRecords.Load()
+		if dropped > 0 {
+			logger.Warn("aggregator stopped with dropped records", "dropped", dropped)
+		}
+
+		if a.exporter != nil {
+			a.exporter.Close()
+		}
+	})
 }
 
 // Record 记录一条 usage 数据（异步非阻塞）
 func (a *Aggregator) Record(infSvcId, sk, model string, input, output, cached int64, duration, ttft time.Duration) {
-	rec := record{
-		infSvcId: infSvcId,
-		sk:       sk,
-		model:    model,
-		input:    input,
-		output:   output,
-		cached:   cached,
-		duration: duration,
-		ttft:     ttft,
+	rec := exporters.Record{
+		InfSvcId:     infSvcId,
+		SK:           sk,
+		Model:        model,
+		InputTokens:  input,
+		OutputTokens: output,
+		CachedTokens: cached,
+		Duration:     duration,
+		TTFT:         ttft,
 	}
 
 	select {
 	case a.recordCh <- rec:
-		// 成功发送
 	default:
-		// channel 满了，丢弃记录并记录日志（避免阻塞调用者）
-		logger.Warn("record channel full, dropping record",
-			"sk", sk,
-			"inf_svc_id", infSvcId,
-			"model", model,
-		)
+		a.droppedRecords.Add(1)
 	}
 }
 
-// flush 推送聚合数据到 Redis Stream
-func (a *Aggregator) flush() {
+// FlushNow 立即触发一次 flush（供 model 变更等场景调用）
+func (a *Aggregator) FlushNow(reason string) {
+	a.flush(reason)
+}
+
+// flush 推送聚合数据到 exporter
+func (a *Aggregator) flush(reason string) {
+	if !a.config.Aggr.Enabled {
+		// 非聚合模式：调用 exporter.Flush 将缓冲区数据发送
+		if err := a.exporter.Flush(); err != nil {
+			logger.Error("exporter flush failed", "error", err, "reason", reason)
+		}
+		return
+	}
+
 	a.mu.Lock()
 	if len(a.aggregates) == 0 {
 		a.mu.Unlock()
+		// 即使没有聚合数据，也 flush exporter 自身缓冲区
+		if err := a.exporter.Flush(); err != nil {
+			logger.Error("exporter flush failed", "error", err, "reason", reason)
+		}
 		return
 	}
 
@@ -234,61 +263,34 @@ func (a *Aggregator) flush() {
 	a.aggregates = make(map[AggregateKey]*AggregateValue)
 	a.mu.Unlock()
 
-	// 推送到 Redis
-	ctx := context.Background()
-	sentAt := time.Now()
-
+	// 转换为 exporter.Record 并发送
 	for key, val := range data {
-		fields := map[string]interface{}{
-			"sk":            key.SK,
-			"model":         val.ModelId,
-			"input_tokens":  val.InputTokens,
-			"output_tokens": val.OutputTokens,
-			"cached_tokens": val.CachedTokens,
-			"count":         val.Count,
-			"window_start":  val.WindowStart.Format(time.RFC3339Nano),
-			"window_end":    val.LastRecorded.Format(time.RFC3339Nano),
-			"sent_at":       sentAt.Format(time.RFC3339Nano),
-			"inf_svc_id":    key.InfSvcId,
-			// 延迟指标（毫秒）
-			"avg_duration_ms": val.DurationSum.Milliseconds() / val.Count,
-			"max_duration_ms": val.DurationMax.Milliseconds(),
-			"avg_ttft_ms":     val.TTFTSum.Milliseconds() / val.Count,
-			"max_ttft_ms":     val.TTFTMax.Milliseconds(),
-		}
+		avgDuration := val.DurationSum / time.Duration(val.Count)
+		avgTTFT := val.TTFTSum / time.Duration(val.Count)
 
-		if err := a.redisClient.XAdd(ctx, a.config.Aggr.StreamKey, fields, a.config.Aggr.StreamMaxLen); err != nil {
-			logger.Error("XAdd failed", "error", err, "sk", key.SK, "inf_svc_id", key.InfSvcId)
-			// 推送失败，数据放回下一个窗口
-			a.mu.Lock()
-			if existing, ok := a.aggregates[key]; ok {
-				existing.InputTokens += val.InputTokens
-				existing.OutputTokens += val.OutputTokens
-				existing.CachedTokens += val.CachedTokens
-				existing.Count += val.Count
-				existing.DurationSum += val.DurationSum
-				if val.DurationMax > existing.DurationMax {
-					existing.DurationMax = val.DurationMax
-				}
-				existing.TTFTSum += val.TTFTSum
-				if val.TTFTMax > existing.TTFTMax {
-					existing.TTFTMax = val.TTFTMax
-				}
-			} else {
-				a.aggregates[key] = val
-			}
-			a.mu.Unlock()
-			continue
-		}
+		a.exporter.Record(exporters.Record{
+			InfSvcId:     key.InfSvcId,
+			SK:           key.SK,
+			Model:        key.Model,
+			InputTokens:  val.InputTokens,
+			OutputTokens: val.OutputTokens,
+			CachedTokens: val.CachedTokens,
+			Duration:     avgDuration,
+			TTFT:         avgTTFT,
+		})
+	}
 
-		logger.Info("XAdd success",
-			"sk", key.SK,
-			"inf_svc_id", key.InfSvcId,
-			"input_tokens", val.InputTokens,
-			"output_tokens", val.OutputTokens,
-			"cached_tokens", val.CachedTokens,
-			"count", val.Count,
-			"model", val.ModelId,
+	// flush exporter 缓冲区
+	if err := a.exporter.Flush(); err != nil {
+		logger.Error("exporter flush failed", "error", err, "reason", reason)
+	}
+
+	// flush 时打印丢弃统计
+	dropped := a.droppedRecords.Swap(0)
+	if dropped > 0 {
+		logger.Warn("records dropped during flush window",
+			"dropped", dropped,
+			"reason", reason,
 		)
 	}
 }
